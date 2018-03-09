@@ -767,7 +767,7 @@ func (ev *evaluator) eval(expr Expr) Value {
 				if ok {
 					mat := make(Matrix, 0, len(sel.series))
 					offset := durationMilliseconds(sel.Offset)
-					points := make([]Point, 0, 10)
+					points := getPointSlice(10)
 					// Process all the calls for one time series at a time.
 					for i, it := range sel.iterators {
 						ss := Series{}
@@ -790,6 +790,7 @@ func (ev *evaluator) eval(expr Expr) Value {
 							mat = append(mat, ss)
 						}
 					}
+          putPointSlice(points)
 					return mat
 				}
 			}
