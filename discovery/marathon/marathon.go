@@ -31,7 +31,6 @@ import (
 	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
-	"github.com/prometheus/prometheus/util/httputil"
 	"github.com/prometheus/prometheus/util/strutil"
 )
 
@@ -138,7 +137,7 @@ func NewDiscovery(conf SDConfig, logger log.Logger) (*Discovery, error) {
 		logger = log.NewNopLogger()
 	}
 
-	rt, err := httputil.NewRoundTripperFromConfig(conf.HTTPClientConfig, "marathon_sd")
+	rt, err := config_util.NewRoundTripperFromConfig(conf.HTTPClientConfig, "marathon_sd")
 	if err != nil {
 		return nil, err
 	}
@@ -336,12 +335,20 @@ func fetchApps(client *http.Client, url string) (*AppList, error) {
 		return nil, err
 	}
 
+	if (resp.StatusCode < 200) || (resp.StatusCode >= 300) {
+		return nil, fmt.Errorf("Non 2xx status '%v' response during marathon service discovery", resp.StatusCode)
+	}
+
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	return parseAppJSON(body)
+	apps, err := parseAppJSON(body)
+	if err != nil {
+		return nil, fmt.Errorf("%v in %s", err, url)
+	}
+	return apps, nil
 }
 
 func parseAppJSON(body []byte) (*AppList, error) {

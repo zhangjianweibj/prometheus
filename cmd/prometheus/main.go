@@ -83,15 +83,16 @@ func main() {
 	cfg := struct {
 		configFile string
 
-		localStoragePath string
-		notifier         notifier.Options
-		notifierTimeout  model.Duration
-		web              web.Options
-		tsdb             tsdb.Options
-		lookbackDelta    model.Duration
-		webTimeout       model.Duration
-		queryTimeout     model.Duration
-		queryConcurrency int
+		localStoragePath    string
+		notifier            notifier.Options
+		notifierTimeout     model.Duration
+		web                 web.Options
+		tsdb                tsdb.Options
+		lookbackDelta       model.Duration
+		webTimeout          model.Duration
+		queryTimeout        model.Duration
+		queryConcurrency    int
+		RemoteFlushDeadline model.Duration
 
 		prometheusURL string
 
@@ -160,6 +161,9 @@ func main() {
 	a.Flag("storage.tsdb.no-lockfile", "Do not create lockfile in data directory.").
 		Default("false").BoolVar(&cfg.tsdb.NoLockfile)
 
+	a.Flag("storage.remote.flush-deadline", "How long to wait flushing sample on shutdown or config reload.").
+		Default("1m").PlaceHolder("<duration>").SetValue(&cfg.RemoteFlushDeadline)
+
 	a.Flag("alertmanager.notification-queue-capacity", "The capacity of the queue for pending Alertmanager notifications.").
 		Default("10000").IntVar(&cfg.notifier.QueueCapacity)
 
@@ -222,7 +226,7 @@ func main() {
 
 	var (
 		localStorage  = &tsdb.ReadyStorage{}
-		remoteStorage = remote.NewStorage(log.With(logger, "component", "remote"), localStorage.StartTime)
+		remoteStorage = remote.NewStorage(log.With(logger, "component", "remote"), localStorage.StartTime, time.Duration(cfg.RemoteFlushDeadline))
 		fanoutStorage = storage.NewFanout(logger, localStorage, remoteStorage)
 	)
 
@@ -468,7 +472,9 @@ func main() {
 
 			},
 			func(err error) {
-				close(cancel)
+				// Wait for any in-progress reloads to complete to avoid
+				// reloading things after they have been shutdown.
+				cancel <- struct{}{}
 			},
 		)
 	}
@@ -498,6 +504,23 @@ func main() {
 				return nil
 			},
 			func(err error) {
+				close(cancel)
+			},
+		)
+	}
+	{
+		// Rule manager.
+		// TODO(krasi) refactor ruleManager.Run() to be blocking to avoid using an extra blocking channel.
+		cancel := make(chan struct{})
+		g.Add(
+			func() error {
+				<-reloadReady.C
+				ruleManager.Run()
+				<-cancel
+				return nil
+			},
+			func(err error) {
+				ruleManager.Stop()
 				close(cancel)
 			},
 		)
@@ -543,27 +566,7 @@ func main() {
 				return nil
 			},
 			func(err error) {
-				// Keep this interrupt before the ruleManager.Stop().
-				// Shutting down the query engine before the rule manager will cause pending queries
-				// to be canceled and ensures a quick shutdown of the rule manager.
 				cancelWeb()
-			},
-		)
-	}
-	{
-		// Rule manager.
-
-		// TODO(krasi) refactor ruleManager.Run() to be blocking to avoid using an extra blocking channel.
-		cancel := make(chan struct{})
-		g.Add(
-			func() error {
-				ruleManager.Run()
-				<-cancel
-				return nil
-			},
-			func(err error) {
-				ruleManager.Stop()
-				close(cancel)
 			},
 		)
 	}
@@ -591,6 +594,7 @@ func main() {
 	}
 	if err := g.Run(); err != nil {
 		level.Error(logger).Log("err", err)
+		os.Exit(1)
 	}
 	level.Info(logger).Log("msg", "See you next time!")
 }
@@ -622,6 +626,7 @@ func reloadConfig(filename string, logger log.Logger, rls ...func(*config.Config
 	if failed {
 		return fmt.Errorf("one or more errors occurred while applying the new configuration (--config.file=%s)", filename)
 	}
+	level.Info(logger).Log("msg", "Completed loading of configuration file", "filename", filename)
 	return nil
 }
 
