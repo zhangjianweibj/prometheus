@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +25,6 @@ import (
 	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
-	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	compute "google.golang.org/api/compute/v1"
 
@@ -40,6 +40,7 @@ const (
 	gceLabelSubnetwork     = gceLabel + "subnetwork"
 	gceLabelPublicIP       = gceLabel + "public_ip"
 	gceLabelPrivateIP      = gceLabel + "private_ip"
+	gceLabelInstanceID     = gceLabel + "instance_id"
 	gceLabelInstanceName   = gceLabel + "instance_name"
 	gceLabelInstanceStatus = gceLabel + "instance_status"
 	gceLabelTags           = gceLabel + "tags"
@@ -138,7 +139,7 @@ func NewDiscovery(conf SDConfig, logger log.Logger) (*Discovery, error) {
 		logger:       logger,
 	}
 	var err error
-	gd.client, err = google.DefaultClient(oauth2.NoContext, compute.ComputeReadonlyScope)
+	gd.client, err = google.DefaultClient(context.Background(), compute.ComputeReadonlyScope)
 	if err != nil {
 		return nil, fmt.Errorf("error setting up communication with GCE service: %s", err)
 	}
@@ -153,7 +154,7 @@ func NewDiscovery(conf SDConfig, logger log.Logger) (*Discovery, error) {
 // Run implements the Discoverer interface.
 func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 	// Get an initial set right away.
-	tg, err := d.refresh()
+	tg, err := d.refresh(ctx)
 	if err != nil {
 		level.Error(d.logger).Log("msg", "Refresh failed", "err", err)
 	} else {
@@ -169,7 +170,7 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 	for {
 		select {
 		case <-ticker.C:
-			tg, err := d.refresh()
+			tg, err := d.refresh(ctx)
 			if err != nil {
 				level.Error(d.logger).Log("msg", "Refresh failed", "err", err)
 				continue
@@ -184,7 +185,7 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 	}
 }
 
-func (d *Discovery) refresh() (tg *targetgroup.Group, err error) {
+func (d *Discovery) refresh(ctx context.Context) (tg *targetgroup.Group, err error) {
 	t0 := time.Now()
 	defer func() {
 		gceSDRefreshDuration.Observe(time.Since(t0).Seconds())
@@ -201,7 +202,7 @@ func (d *Discovery) refresh() (tg *targetgroup.Group, err error) {
 	if len(d.filter) > 0 {
 		ilc = ilc.Filter(d.filter)
 	}
-	err = ilc.Pages(context.TODO(), func(l *compute.InstanceList) error {
+	err = ilc.Pages(ctx, func(l *compute.InstanceList) error {
 		for _, inst := range l.Items {
 			if len(inst.NetworkInterfaces) == 0 {
 				continue
@@ -209,6 +210,7 @@ func (d *Discovery) refresh() (tg *targetgroup.Group, err error) {
 			labels := model.LabelSet{
 				gceLabelProject:        model.LabelValue(d.project),
 				gceLabelZone:           model.LabelValue(inst.Zone),
+				gceLabelInstanceID:     model.LabelValue(strconv.FormatUint(inst.Id, 10)),
 				gceLabelInstanceName:   model.LabelValue(inst.Name),
 				gceLabelInstanceStatus: model.LabelValue(inst.Status),
 				gceLabelMachineType:    model.LabelValue(inst.MachineType),
@@ -241,11 +243,9 @@ func (d *Discovery) refresh() (tg *targetgroup.Group, err error) {
 			}
 
 			// GCE labels are key-value pairs that group associated resources
-			if inst.Labels != nil {
-				for key, value := range inst.Labels {
-					name := strutil.SanitizeLabelName(key)
-					labels[gceLabelLabel+model.LabelName(name)] = model.LabelValue(value)
-				}
+			for key, value := range inst.Labels {
+				name := strutil.SanitizeLabelName(key)
+				labels[gceLabelLabel+model.LabelName(name)] = model.LabelValue(value)
 			}
 
 			if len(priIface.AccessConfigs) > 0 {

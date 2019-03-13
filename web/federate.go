@@ -14,6 +14,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 
@@ -36,13 +37,20 @@ var (
 		Name: "prometheus_web_federation_errors_total",
 		Help: "Total number of errors that occurred while sending federation responses.",
 	})
+	federationWarnings = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "prometheus_web_federation_warnings_total",
+		Help: "Total number of warnings that occurred while sending federation responses.",
+	})
 )
 
 func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 	h.mtx.RLock()
 	defer h.mtx.RUnlock()
 
-	req.ParseForm()
+	if err := req.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("error parsing form values: %v", err), http.StatusBadRequest)
+		return
+	}
 
 	var matcherSets [][]*labels.Matcher
 	for _, s := range req.Form["match[]"] {
@@ -72,9 +80,18 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 
 	vec := make(promql.Vector, 0, 8000)
 
+	params := &storage.SelectParams{
+		Start: mint,
+		End:   maxt,
+	}
+
 	var sets []storage.SeriesSet
 	for _, mset := range matcherSets {
-		s, err := q.Select(nil, mset...)
+		s, wrns, err := q.Select(params, mset...)
+		if wrns != nil {
+			level.Debug(h.logger).Log("msg", "federation select returned warnings", "warnings", wrns)
+			federationWarnings.Add(float64(len(wrns)))
+		}
 		if err != nil {
 			federationErrors.Inc()
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -83,13 +100,14 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 		sets = append(sets, s)
 	}
 
-	set := storage.NewMergeSeriesSet(sets)
+	set := storage.NewMergeSeriesSet(sets, nil)
+	it := storage.NewBuffer(int64(promql.LookbackDelta / 1e6))
 	for set.Next() {
 		s := set.At()
 
 		// TODO(fabxc): allow fast path for most recent sample either
 		// in the storage itself or caching layer in Prometheus.
-		it := storage.NewBuffer(s.Iterator(), int64(promql.LookbackDelta/1e6))
+		it.Reset(s.Iterator())
 
 		var t int64
 		var v float64

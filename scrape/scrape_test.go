@@ -29,14 +29,14 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
-
-	dto "github.com/prometheus/client_model/go"
 
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/pkg/relabel"
 	"github.com/prometheus/prometheus/pkg/textparse"
 	"github.com/prometheus/prometheus/pkg/timestamp"
 	"github.com/prometheus/prometheus/pkg/value"
@@ -46,9 +46,9 @@ import (
 
 func TestNewScrapePool(t *testing.T) {
 	var (
-		app = &nopAppendable{}
-		cfg = &config.ScrapeConfig{}
-		sp  = newScrapePool(cfg, app, nil)
+		app   = &nopAppendable{}
+		cfg   = &config.ScrapeConfig{}
+		sp, _ = newScrapePool(cfg, app, 0, nil)
 	)
 
 	if a, ok := sp.appendable.(*nopAppendable); !ok || a != app {
@@ -68,10 +68,10 @@ func TestDroppedTargetsList(t *testing.T) {
 		cfg = &config.ScrapeConfig{
 			JobName:        "dropMe",
 			ScrapeInterval: model.Duration(1),
-			RelabelConfigs: []*config.RelabelConfig{
+			RelabelConfigs: []*relabel.Config{
 				{
-					Action:       config.RelabelDrop,
-					Regex:        mustNewRegexp("dropMe"),
+					Action:       relabel.Drop,
+					Regex:        relabel.MustNewRegexp("dropMe"),
 					SourceLabels: model.LabelNames{"job"},
 				},
 			},
@@ -79,11 +79,11 @@ func TestDroppedTargetsList(t *testing.T) {
 		tgs = []*targetgroup.Group{
 			{
 				Targets: []model.LabelSet{
-					model.LabelSet{model.AddressLabel: "127.0.0.1:9090"},
+					{model.AddressLabel: "127.0.0.1:9090"},
 				},
 			},
 		}
-		sp                     = newScrapePool(cfg, app, nil)
+		sp, _                  = newScrapePool(cfg, app, 0, nil)
 		expectedLabelSetString = "{__address__=\"127.0.0.1:9090\", __metrics_path__=\"\", __scheme__=\"\", job=\"dropMe\"}"
 		expectedLength         = 1
 	)
@@ -107,7 +107,7 @@ func TestDiscoveredLabelsUpdate(t *testing.T) {
 		ScrapeInterval: model.Duration(1),
 		ScrapeTimeout:  model.Duration(1),
 	}
-	sp.targets = make(map[uint64]*Target)
+	sp.activeTargets = make(map[uint64]*Target)
 	t1 := &Target{
 		discoveredLabels: labels.Labels{
 			labels.Label{
@@ -116,7 +116,7 @@ func TestDiscoveredLabelsUpdate(t *testing.T) {
 			},
 		},
 	}
-	sp.targets[t1.hash()] = t1
+	sp.activeTargets[t1.hash()] = t1
 
 	t2 := &Target{
 		discoveredLabels: labels.Labels{
@@ -128,7 +128,7 @@ func TestDiscoveredLabelsUpdate(t *testing.T) {
 	}
 	sp.sync([]*Target{t2})
 
-	testutil.Equals(t, t2.DiscoveredLabels(), sp.targets[t1.hash()].DiscoveredLabels())
+	testutil.Equals(t, t2.DiscoveredLabels(), sp.activeTargets[t1.hash()].DiscoveredLabels())
 }
 
 type testLoop struct {
@@ -146,9 +146,9 @@ func (l *testLoop) stop() {
 
 func TestScrapePoolStop(t *testing.T) {
 	sp := &scrapePool{
-		targets: map[uint64]*Target{},
-		loops:   map[uint64]loop{},
-		cancel:  func() {},
+		activeTargets: map[uint64]*Target{},
+		loops:         map[uint64]loop{},
+		cancel:        func() {},
 	}
 	var mtx sync.Mutex
 	stopped := map[uint64]bool{}
@@ -171,7 +171,7 @@ func TestScrapePoolStop(t *testing.T) {
 			mtx.Unlock()
 		}
 
-		sp.targets[t.hash()] = t
+		sp.activeTargets[t.hash()] = t
 		sp.loops[t.hash()] = l
 	}
 
@@ -199,8 +199,8 @@ func TestScrapePoolStop(t *testing.T) {
 	}
 	mtx.Unlock()
 
-	if len(sp.targets) > 0 {
-		t.Fatalf("Targets were not cleared on stopping: %d left", len(sp.targets))
+	if len(sp.activeTargets) > 0 {
+		t.Fatalf("Targets were not cleared on stopping: %d left", len(sp.activeTargets))
 	}
 	if len(sp.loops) > 0 {
 		t.Fatalf("Loops were not cleared on stopping: %d left", len(sp.loops))
@@ -219,7 +219,7 @@ func TestScrapePoolReload(t *testing.T) {
 	}
 	// On starting to run, new loops created on reload check whether their preceding
 	// equivalents have been stopped.
-	newLoop := func(_ *Target, s scraper, _ int, _ bool, _ []*config.RelabelConfig) loop {
+	newLoop := func(opts scrapeLoopOptions) loop {
 		l := &testLoop{}
 		l.startFunc = func(interval, timeout time.Duration, errc chan<- error) {
 			if interval != 3*time.Second {
@@ -229,19 +229,19 @@ func TestScrapePoolReload(t *testing.T) {
 				t.Errorf("Expected scrape timeout %d but got %d", 2*time.Second, timeout)
 			}
 			mtx.Lock()
-			if !stopped[s.(*targetScraper).hash()] {
-				t.Errorf("Scrape loop for %v not stopped yet", s.(*targetScraper))
+			if !stopped[opts.scraper.(*targetScraper).hash()] {
+				t.Errorf("Scrape loop for %v not stopped yet", opts.scraper.(*targetScraper))
 			}
 			mtx.Unlock()
 		}
 		return l
 	}
 	sp := &scrapePool{
-		appendable: &nopAppendable{},
-		targets:    map[uint64]*Target{},
-		loops:      map[uint64]loop{},
-		newLoop:    newLoop,
-		logger:     nil,
+		appendable:    &nopAppendable{},
+		activeTargets: map[uint64]*Target{},
+		loops:         map[uint64]loop{},
+		newLoop:       newLoop,
+		logger:        nil,
 	}
 
 	// Reloading a scrape pool with a new scrape configuration must stop all scrape
@@ -261,13 +261,13 @@ func TestScrapePoolReload(t *testing.T) {
 			mtx.Unlock()
 		}
 
-		sp.targets[t.hash()] = t
+		sp.activeTargets[t.hash()] = t
 		sp.loops[t.hash()] = l
 	}
 	done := make(chan struct{})
 
 	beforeTargets := map[uint64]*Target{}
-	for h, t := range sp.targets {
+	for h, t := range sp.activeTargets {
 		beforeTargets[h] = t
 	}
 
@@ -294,7 +294,7 @@ func TestScrapePoolReload(t *testing.T) {
 	}
 	mtx.Unlock()
 
-	if !reflect.DeepEqual(sp.targets, beforeTargets) {
+	if !reflect.DeepEqual(sp.activeTargets, beforeTargets) {
 		t.Fatalf("Reloading affected target states unexpectedly")
 	}
 	if len(sp.loops) != numTargets {
@@ -305,9 +305,11 @@ func TestScrapePoolReload(t *testing.T) {
 func TestScrapePoolAppender(t *testing.T) {
 	cfg := &config.ScrapeConfig{}
 	app := &nopAppendable{}
-	sp := newScrapePool(cfg, app, nil)
+	sp, _ := newScrapePool(cfg, app, 0, nil)
 
-	loop := sp.newLoop(&Target{}, nil, 0, false, nil)
+	loop := sp.newLoop(scrapeLoopOptions{
+		target: &Target{},
+	})
 	appl, ok := loop.(*scrapeLoop)
 	if !ok {
 		t.Fatalf("Expected scrapeLoop but got %T", loop)
@@ -322,7 +324,10 @@ func TestScrapePoolAppender(t *testing.T) {
 		t.Fatalf("Expected base appender but got %T", tl.Appender)
 	}
 
-	loop = sp.newLoop(&Target{}, nil, 100, false, nil)
+	loop = sp.newLoop(scrapeLoopOptions{
+		target: &Target{},
+		limit:  100,
+	})
 	appl, ok = loop.(*scrapeLoop)
 	if !ok {
 		t.Fatalf("Expected scrapeLoop but got %T", loop)
@@ -348,25 +353,27 @@ func TestScrapePoolRaces(t *testing.T) {
 	newConfig := func() *config.ScrapeConfig {
 		return &config.ScrapeConfig{ScrapeInterval: interval, ScrapeTimeout: timeout}
 	}
-	sp := newScrapePool(newConfig(), &nopAppendable{}, nil)
+	sp, _ := newScrapePool(newConfig(), &nopAppendable{}, 0, nil)
 	tgts := []*targetgroup.Group{
-		&targetgroup.Group{
+		{
 			Targets: []model.LabelSet{
-				model.LabelSet{model.AddressLabel: "127.0.0.1:9090"},
-				model.LabelSet{model.AddressLabel: "127.0.0.2:9090"},
-				model.LabelSet{model.AddressLabel: "127.0.0.3:9090"},
-				model.LabelSet{model.AddressLabel: "127.0.0.4:9090"},
-				model.LabelSet{model.AddressLabel: "127.0.0.5:9090"},
-				model.LabelSet{model.AddressLabel: "127.0.0.6:9090"},
-				model.LabelSet{model.AddressLabel: "127.0.0.7:9090"},
-				model.LabelSet{model.AddressLabel: "127.0.0.8:9090"},
+				{model.AddressLabel: "127.0.0.1:9090"},
+				{model.AddressLabel: "127.0.0.2:9090"},
+				{model.AddressLabel: "127.0.0.3:9090"},
+				{model.AddressLabel: "127.0.0.4:9090"},
+				{model.AddressLabel: "127.0.0.5:9090"},
+				{model.AddressLabel: "127.0.0.6:9090"},
+				{model.AddressLabel: "127.0.0.7:9090"},
+				{model.AddressLabel: "127.0.0.8:9090"},
 			},
 		},
 	}
 
-	active, dropped := sp.Sync(tgts)
+	sp.Sync(tgts)
+	active := sp.ActiveTargets()
+	dropped := sp.DroppedTargets()
 	expectedActive, expectedDropped := len(tgts[0].Targets), 0
-	if len(active) != expectedActive {
+	if len(sp.ActiveTargets()) != expectedActive {
 		t.Fatalf("Invalid number of active targets: expected %v, got %v", expectedActive, len(active))
 	}
 	if len(dropped) != expectedDropped {
@@ -388,7 +395,7 @@ func TestScrapeLoopStopBeforeRun(t *testing.T) {
 		nil, nil,
 		nopMutator,
 		nopMutator,
-		nil, nil,
+		nil, nil, 0,
 	)
 
 	// The scrape pool synchronizes on stopping scrape loops. However, new scrape
@@ -452,6 +459,7 @@ func TestScrapeLoopStop(t *testing.T) {
 		nopMutator,
 		app,
 		nil,
+		0,
 	)
 
 	// Terminate loop after 2 scrapes.
@@ -517,6 +525,7 @@ func TestScrapeLoopRun(t *testing.T) {
 		nopMutator,
 		app,
 		nil,
+		0,
 	)
 
 	// The loop must terminate during the initial offset if the context
@@ -562,6 +571,7 @@ func TestScrapeLoopRun(t *testing.T) {
 		nopMutator,
 		app,
 		nil,
+		0,
 	)
 
 	go func() {
@@ -610,16 +620,17 @@ func TestScrapeLoopMetadata(t *testing.T) {
 		nopMutator,
 		func() storage.Appender { return nopAppender{} },
 		cache,
+		0,
 	)
 	defer cancel()
 
-	total, _, err := sl.append([]byte(`
-# TYPE test_metric counter
+	total, _, err := sl.append([]byte(`# TYPE test_metric counter
 # HELP test_metric some help text
-# other comment
+# UNIT test_metric metric
 test_metric 1
 # TYPE test_metric_no_help gauge
-# HELP test_metric_no_type other help text`), time.Now())
+# HELP test_metric_no_type other help text
+# EOF`), "application/openmetrics-text", time.Now())
 	testutil.Ok(t, err)
 	testutil.Equals(t, 1, total)
 
@@ -627,16 +638,19 @@ test_metric 1
 	testutil.Assert(t, ok, "expected metadata to be present")
 	testutil.Assert(t, textparse.MetricTypeCounter == md.Type, "unexpected metric type")
 	testutil.Equals(t, "some help text", md.Help)
+	testutil.Equals(t, "metric", md.Unit)
 
 	md, ok = cache.getMetadata("test_metric_no_help")
 	testutil.Assert(t, ok, "expected metadata to be present")
 	testutil.Assert(t, textparse.MetricTypeGauge == md.Type, "unexpected metric type")
 	testutil.Equals(t, "", md.Help)
+	testutil.Equals(t, "", md.Unit)
 
 	md, ok = cache.getMetadata("test_metric_no_type")
 	testutil.Assert(t, ok, "expected metadata to be present")
-	testutil.Assert(t, textparse.MetricTypeUntyped == md.Type, "unexpected metric type")
+	testutil.Assert(t, textparse.MetricTypeUnknown == md.Type, "unexpected metric type")
 	testutil.Equals(t, "other help text", md.Help)
+	testutil.Equals(t, "", md.Unit)
 }
 
 func TestScrapeLoopRunCreatesStaleMarkersOnFailedScrape(t *testing.T) {
@@ -656,6 +670,7 @@ func TestScrapeLoopRunCreatesStaleMarkersOnFailedScrape(t *testing.T) {
 		nopMutator,
 		app,
 		nil,
+		0,
 	)
 	// Succeed once, several failures, then stop.
 	numScrapes := 0
@@ -714,6 +729,7 @@ func TestScrapeLoopRunCreatesStaleMarkersOnParseFailure(t *testing.T) {
 		nopMutator,
 		app,
 		nil,
+		0,
 	)
 
 	// Succeed once, several failures, then stop.
@@ -818,11 +834,12 @@ func TestScrapeLoopAppend(t *testing.T) {
 			},
 			func() storage.Appender { return app },
 			nil,
+			0,
 		)
 
 		now := time.Now()
 
-		_, _, err := sl.append([]byte(test.scrapeLabels), now)
+		_, _, err := sl.append([]byte(test.scrapeLabels), "", now)
 		if err != nil {
 			t.Fatalf("Unexpected append error: %s", err)
 		}
@@ -857,6 +874,7 @@ func TestScrapeLoopAppendSampleLimit(t *testing.T) {
 		nopMutator,
 		func() storage.Appender { return app },
 		nil,
+		0,
 	)
 
 	// Get the value of the Counter before performing the append.
@@ -868,12 +886,12 @@ func TestScrapeLoopAppendSampleLimit(t *testing.T) {
 	beforeMetricValue := beforeMetric.GetCounter().GetValue()
 
 	now := time.Now()
-	_, _, err = sl.append([]byte("metric_a 1\nmetric_b 1\nmetric_c 1\n"), now)
+	_, _, err = sl.append([]byte("metric_a 1\nmetric_b 1\nmetric_c 1\n"), "", now)
 	if err != errSampleLimit {
 		t.Fatalf("Did not see expected sample limit error: %s", err)
 	}
 
-	// Check that the Counter has been incremented a simgle time for the scrape,
+	// Check that the Counter has been incremented a single time for the scrape,
 	// not multiple times for each sample.
 	metric := dto.Metric{}
 	err = targetScrapeSampleLimit.Write(&metric)
@@ -917,14 +935,15 @@ func TestScrapeLoop_ChangingMetricString(t *testing.T) {
 		nopMutator,
 		func() storage.Appender { return capp },
 		nil,
+		0,
 	)
 
 	now := time.Now()
-	_, _, err = sl.append([]byte(`metric_a{a="1",b="1"} 1`), now)
+	_, _, err = sl.append([]byte(`metric_a{a="1",b="1"} 1`), "", now)
 	if err != nil {
 		t.Fatalf("Unexpected append error: %s", err)
 	}
-	_, _, err = sl.append([]byte(`metric_a{b="1",a="1"} 2`), now.Add(time.Minute))
+	_, _, err = sl.append([]byte(`metric_a{b="1",a="1"} 2`), "", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("Unexpected append error: %s", err)
 	}
@@ -956,14 +975,15 @@ func TestScrapeLoopAppendStaleness(t *testing.T) {
 		nopMutator,
 		func() storage.Appender { return app },
 		nil,
+		0,
 	)
 
 	now := time.Now()
-	_, _, err := sl.append([]byte("metric_a 1\n"), now)
+	_, _, err := sl.append([]byte("metric_a 1\n"), "", now)
 	if err != nil {
 		t.Fatalf("Unexpected append error: %s", err)
 	}
-	_, _, err = sl.append([]byte(""), now.Add(time.Second))
+	_, _, err = sl.append([]byte(""), "", now.Add(time.Second))
 	if err != nil {
 		t.Fatalf("Unexpected append error: %s", err)
 	}
@@ -1001,14 +1021,15 @@ func TestScrapeLoopAppendNoStalenessIfTimestamp(t *testing.T) {
 		nopMutator,
 		func() storage.Appender { return app },
 		nil,
+		0,
 	)
 
 	now := time.Now()
-	_, _, err := sl.append([]byte("metric_a 1 1000\n"), now)
+	_, _, err := sl.append([]byte("metric_a 1 1000\n"), "", now)
 	if err != nil {
 		t.Fatalf("Unexpected append error: %s", err)
 	}
-	_, _, err = sl.append([]byte(""), now.Add(time.Second))
+	_, _, err = sl.append([]byte(""), "", now.Add(time.Second))
 	if err != nil {
 		t.Fatalf("Unexpected append error: %s", err)
 	}
@@ -1040,6 +1061,7 @@ func TestScrapeLoopRunReportsTargetDownOnScrapeError(t *testing.T) {
 		nopMutator,
 		app,
 		nil,
+		0,
 	)
 
 	scraper.scrapeFunc = func(ctx context.Context, w io.Writer) error {
@@ -1069,6 +1091,7 @@ func TestScrapeLoopRunReportsTargetDownOnInvalidUTF8(t *testing.T) {
 		nopMutator,
 		app,
 		nil,
+		0,
 	)
 
 	scraper.scrapeFunc = func(ctx context.Context, w io.Writer) error {
@@ -1115,10 +1138,11 @@ func TestScrapeLoopAppendGracefullyIfAmendOrOutOfOrderOrOutOfBounds(t *testing.T
 		nopMutator,
 		func() storage.Appender { return app },
 		nil,
+		0,
 	)
 
 	now := time.Unix(1, 0)
-	_, _, err := sl.append([]byte("out_of_order 1\namend 1\nnormal 1\nout_of_bounds 1\n"), now)
+	_, _, err := sl.append([]byte("out_of_order 1\namend 1\nnormal 1\nout_of_bounds 1\n"), "", now)
 	if err != nil {
 		t.Fatalf("Unexpected append error: %s", err)
 	}
@@ -1148,10 +1172,11 @@ func TestScrapeLoopOutOfBoundsTimeError(t *testing.T) {
 			}
 		},
 		nil,
+		0,
 	)
 
 	now := time.Now().Add(20 * time.Minute)
-	total, added, err := sl.append([]byte("normal 1\n"), now)
+	total, added, err := sl.append([]byte("normal 1\n"), "", now)
 	if total != 1 {
 		t.Error("expected 1 metric")
 		return
@@ -1175,8 +1200,8 @@ func TestTargetScraperScrapeOK(t *testing.T) {
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			accept := r.Header.Get("Accept")
-			if !strings.HasPrefix(accept, "text/plain;") {
-				t.Errorf("Expected Accept header to prefer text/plain, got %q", accept)
+			if !strings.HasPrefix(accept, "application/openmetrics-text;") {
+				t.Errorf("Expected Accept header to prefer application/openmetrics-text, got %q", accept)
 			}
 
 			timeout := r.Header.Get("X-Prometheus-Scrape-Timeout-Seconds")
@@ -1207,9 +1232,11 @@ func TestTargetScraperScrapeOK(t *testing.T) {
 	}
 	var buf bytes.Buffer
 
-	if err := ts.scrape(context.Background(), &buf); err != nil {
+	contentType, err := ts.scrape(context.Background(), &buf)
+	if err != nil {
 		t.Fatalf("Unexpected scrape error: %s", err)
 	}
+	require.Equal(t, "text/plain; version=0.0.4", contentType)
 	require.Equal(t, "metric_a 1\nmetric_b 2\n", buf.String())
 }
 
@@ -1247,8 +1274,11 @@ func TestTargetScrapeScrapeCancel(t *testing.T) {
 	}()
 
 	go func() {
-		if err := ts.scrape(ctx, ioutil.Discard); err != context.Canceled {
-			errc <- fmt.Errorf("Expected context cancelation error but got: %s", err)
+		_, err := ts.scrape(ctx, ioutil.Discard)
+		if err == nil {
+			errc <- fmt.Errorf("Expected error but got nil")
+		} else if ctx.Err() != context.Canceled {
+			errc <- fmt.Errorf("Expected context cancelation error but got: %s", ctx.Err())
 		}
 		close(errc)
 	}()
@@ -1289,7 +1319,7 @@ func TestTargetScrapeScrapeNotFound(t *testing.T) {
 		client: http.DefaultClient,
 	}
 
-	if err := ts.scrape(context.Background(), ioutil.Discard); !strings.Contains(err.Error(), "404") {
+	if _, err := ts.scrape(context.Background(), ioutil.Discard); !strings.Contains(err.Error(), "404") {
 		t.Fatalf("Expected \"404 NotFound\" error but got: %s", err)
 	}
 }
@@ -1307,7 +1337,7 @@ type testScraper struct {
 	scrapeFunc func(context.Context, io.Writer) error
 }
 
-func (ts *testScraper) offset(interval time.Duration) time.Duration {
+func (ts *testScraper) offset(interval time.Duration, jitterSeed uint64) time.Duration {
 	return ts.offsetDur
 }
 
@@ -1317,9 +1347,9 @@ func (ts *testScraper) report(start time.Time, duration time.Duration, err error
 	ts.lastError = err
 }
 
-func (ts *testScraper) scrape(ctx context.Context, w io.Writer) error {
+func (ts *testScraper) scrape(ctx context.Context, w io.Writer) (string, error) {
 	if ts.scrapeFunc != nil {
-		return ts.scrapeFunc(ctx, w)
+		return "", ts.scrapeFunc(ctx, w)
 	}
-	return ts.scrapeErr
+	return "", ts.scrapeErr
 }

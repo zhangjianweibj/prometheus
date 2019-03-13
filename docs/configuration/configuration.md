@@ -24,7 +24,7 @@ This will also reload any configured rule files.
 
 To specify which configuration file to load, use the `--config.file` flag.
 
-The file is written in [YAML format](http://en.wikipedia.org/wiki/YAML),
+The file is written in [YAML format](https://en.wikipedia.org/wiki/YAML),
 defined by the scheme described below.
 Brackets indicate that a parameter is optional. For non-list parameters the
 value is set to the specified default.
@@ -246,7 +246,7 @@ A `tls_config` allows configuring TLS connections.
 [ key_file: <filename> ]
 
 # ServerName extension to indicate the name of the server.
-# http://tools.ietf.org/html/rfc4366#section-3.1
+# https://tools.ietf.org/html/rfc4366#section-3.1
 [ server_name: <string> ]
 
 # Disable validation of the server certificate.
@@ -266,19 +266,28 @@ The following meta labels are available on targets during relabeling:
 * `__meta_azure_machine_private_ip`: the machine's private IP
 * `__meta_azure_machine_resource_group`: the machine's resource group
 * `__meta_azure_machine_tag_<tagname>`: each tag value of the machine
+* `__meta_azure_machine_scale_set`: the name of the scale set which the vm is part of (this value is only set if you are using a [scale set](https://docs.microsoft.com/en-us/azure/virtual-machine-scale-sets/))
+* `__meta_azure_subscription_id`: the subscription ID
+* `__meta_azure_tenant_id`: the tenant ID
 
 See below for the configuration options for Azure discovery:
 
 ```yaml
 # The information to access the Azure API.
-# The subscription ID.
+# The Azure environment.
+[ environment: <string> | default = AzurePublicCloud ]
+
+# The authentication method, either OAuth or ManagedIdentity.
+# See https://docs.microsoft.com/en-us/azure/active-directory/managed-identities-azure-resources/overview
+[ authentication_method: <string> | default = OAuth]
+# The subscription ID. Always required.
 subscription_id: <string>
-# The tenant ID.
-tenant_id: <string>
-# The client ID.
-client_id: <string>
-# The client secret.
-client_secret: <secret>
+# Optional tenant ID. Only required with authentication_method OAuth.
+[ tenant_id: <string> ]
+# Optional client ID. Only required with authentication_method OAuth.
+[ client_id: <string> ]
+# Optional client secret. Only required with authentication_method OAuth.
+[ client_secret: <secret> ]
 
 # Refresh interval to re-read the instance list.
 [ refresh_interval: <duration> | default = 300s ]
@@ -297,10 +306,12 @@ The following meta labels are available on targets during [relabeling](#relabel_
 
 * `__meta_consul_address`: the address of the target
 * `__meta_consul_dc`: the datacenter name for the target
+* `__meta_consul_tagged_address_<key>`: each node tagged address key value of the target
 * `__meta_consul_metadata_<key>`: each node metadata key value of the target
 * `__meta_consul_node`: the node name defined for the target
 * `__meta_consul_service_address`: the service address of the target
 * `__meta_consul_service_id`: the service ID of the target
+* `__meta_consul_service_metadata_<key>`: each service metadata key value of the target
 * `__meta_consul_service_port`: the service port of the target
 * `__meta_consul_service`: the name of the service the target belongs to
 * `__meta_consul_tags`: the list of tags of the target joined by the tag separator
@@ -326,8 +337,9 @@ services:
 # See https://www.consul.io/api/catalog.html#list-nodes-for-service to know more
 # about the possible filters that can be used.
 
-# An optional tag used to filter nodes for a given service.
-[ tag: <string> ]
+# An optional list of tags used to filter nodes for a given service. Services must contain all tags in the list.
+tags:
+  [ - <string> ]
 
 # Node metadata used to filter nodes for a given service.
 [ node_meta:
@@ -400,6 +412,10 @@ The following meta labels are available on targets during [relabeling](#relabel_
 * `__meta_ec2_instance_id`: the EC2 instance ID
 * `__meta_ec2_instance_state`: the state of the EC2 instance
 * `__meta_ec2_instance_type`: the type of the EC2 instance
+* `__meta_ec2_owner_id`: the ID of the AWS account that owns the EC2 instance
+* `__meta_ec2_platform`: the Operating System platform, set to 'windows' on Windows servers, absent otherwise
+* `__meta_ec2_primary_subnet_id`: the subnet ID of the primary network interface, if available
+* `__meta_ec2_private_dns_name`: the private DNS name of the instance, if available
 * `__meta_ec2_private_ip`: the private IP address of the instance, if present
 * `__meta_ec2_public_dns_name`: the public DNS name of the instance, if available
 * `__meta_ec2_public_ip`: the public IP address of the instance, if available
@@ -414,6 +430,9 @@ See below for the configuration options for EC2 discovery:
 
 # The AWS Region.
 region: <string>
+
+# Custom endpoint to be used.
+[ endpoint: <string> ]
 
 # The AWS API keys. If blank, the environment variables `AWS_ACCESS_KEY_ID`
 # and `AWS_SECRET_ACCESS_KEY` are used.
@@ -451,20 +470,26 @@ support for filtering instances.
 OpenStack SD configurations allow retrieving scrape targets from OpenStack Nova
 instances.
 
+One of the following `<openstack_role>` types can be configured to discover targets:
+
+#### `hypervisor`
+
+The `hypervisor` role discovers one target per Nova hypervisor node. The target
+address defaults to the `host_ip` attribute of the hypervisor.
+
 The following meta labels are available on targets during [relabeling](#relabel_config):
 
-* `__meta_openstack_instance_id`: the OpenStack instance ID.
-* `__meta_openstack_instance_name`: the OpenStack instance name.
-* `__meta_openstack_instance_status`: the status of the OpenStack instance.
-* `__meta_openstack_instance_flavor`: the flavor of the OpenStack instance.
-* `__meta_openstack_public_ip`: the public IP of the OpenStack instance.
-* `__meta_openstack_private_ip`: the private IP of the OpenStack instance.
-* `__meta_openstack_tag_<tagkey>`: each tag value of the instance.
+* `__meta_openstack_hypervisor_host_ip`: the hypervisor node's IP address.
+* `__meta_openstack_hypervisor_name`: the hypervisor node's name.
+* `__meta_openstack_hypervisor_state`: the hypervisor node's state.
+* `__meta_openstack_hypervisor_status`: the hypervisor node's status.
+* `__meta_openstack_hypervisor_type`: the hypervisor node's type.
 
 #### `instance`
 
-The `instance` role discovers one target per Nova instance. The target
-address defaults to the first private IP address of the instance.
+The `instance` role discovers one target per network interface of Nova
+instance. The target address defaults to the private IP address of the network
+interface.
 
 The following meta labels are available on targets during [relabeling](#relabel_config):
 
@@ -474,6 +499,7 @@ The following meta labels are available on targets during [relabeling](#relabel_
 * `__meta_openstack_instance_flavor`: the flavor of the OpenStack instance.
 * `__meta_openstack_public_ip`: the public IP of the OpenStack instance.
 * `__meta_openstack_private_ip`: the private IP of the OpenStack instance.
+* `__meta_openstack_address_pool`: the pool of the private IP.
 * `__meta_openstack_tag_<tagkey>`: each tag value of the instance.
 
 See below for the configuration options for OpenStack discovery:
@@ -482,7 +508,7 @@ See below for the configuration options for OpenStack discovery:
 # The information to access the OpenStack API.
 
 # The OpenStack role of entities that should be discovered.
-role: <role>
+role: <openstack_role>
 
 # The OpenStack Region.
 region: <string>
@@ -515,12 +541,31 @@ region: <string>
 [ project_name: <string> ]
 [ project_id: <string> ]
 
+# The application_credential_id or application_credential_name fields are
+# required if using an application credential to authenticate. Some providers
+# allow you to create an application credential to authenticate rather than a
+# password.
+[ application_credential_name: <string> ]
+[ application_credential_id: <string> ]
+
+# The application_credential_secret field is required if using an application
+# credential to authenticate.
+[ application_credential_secret: <secret> ]
+
+# Whether the service discovery should list all instances for all projects.
+# It is only relevant for the 'instance' role and usually requires admin permissions.
+[ all_tenants: <boolean> | default: false ]
+
 # Refresh interval to re-read the instance list.
 [ refresh_interval: <duration> | default = 60s ]
 
 # The port to scrape metrics from. If using the public IP address, this must
 # instead be specified in the relabeling rule.
 [ port: <int> | default = 80 ]
+
+# TLS configuration.
+tls_config:
+  [ <tls_config> ]
 ```
 
 ### `<file_sd_config>`
@@ -578,6 +623,7 @@ address with relabeling.
 
 The following meta labels are available on targets during [relabeling](#relabel_config):
 
+* `__meta_gce_instance_id`: the numeric id of the instance
 * `__meta_gce_instance_name`: the name of the instance
 * `__meta_gce_label_<name>`: each GCE label of the instance
 * `__meta_gce_machine_type`: full or partial URL of the machine type of the instance
@@ -633,7 +679,7 @@ service account and place the credential file in one of the expected locations.
 ### `<kubernetes_sd_config>`
 
 Kubernetes SD configurations allow retrieving scrape targets from
-[Kubernetes'](http://kubernetes.io/) REST API and always staying synchronized with
+[Kubernetes'](https://kubernetes.io/) REST API and always staying synchronized with
 the cluster state.
 
 One of the following `role` types can be configured to discover targets:
@@ -666,9 +712,11 @@ service port.
 Available meta labels:
 
 * `__meta_kubernetes_namespace`: The namespace of the service object.
-* `__meta_kubernetes_service_name`: The name of the service object.
-* `__meta_kubernetes_service_label_<labelname>`: The label of the service object.
 * `__meta_kubernetes_service_annotation_<annotationname>`: The annotation of the service object.
+* `__meta_kubernetes_service_cluster_ip`: The cluster IP address of the service. (Does not apply to services of type ExternalName)
+* `__meta_kubernetes_service_external_name`: The DNS name of the service. (Applies to services of type ExternalName)
+* `__meta_kubernetes_service_label_<labelname>`: The label of the service object.
+* `__meta_kubernetes_service_name`: The name of the service object.
 * `__meta_kubernetes_service_port_name`: Name of the service port for the target.
 * `__meta_kubernetes_service_port_number`: Number of the service port for the target.
 * `__meta_kubernetes_service_port_protocol`: Protocol of the service port for the target.
@@ -691,6 +739,8 @@ Available meta labels:
 * `__meta_kubernetes_pod_container_port_number`: Number of the container port.
 * `__meta_kubernetes_pod_container_port_protocol`: Protocol of the container port.
 * `__meta_kubernetes_pod_ready`: Set to `true` or `false` for the pod's ready state.
+* `__meta_kubernetes_pod_phase`: Set to `Pending`, `Running`, `Succeeded`, `Failed` or `Unknown`
+  in the [lifecycle](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-phase).
 * `__meta_kubernetes_pod_node_name`: The name of the node the pod is scheduled onto.
 * `__meta_kubernetes_pod_host_ip`: The current host IP of the pod object.
 * `__meta_kubernetes_pod_uid`: The UID of the pod object.
@@ -762,6 +812,9 @@ basic_auth:
 
 # Optional bearer token file authentication information.
 [ bearer_token_file: <filename> ]
+
+# Optional proxy URL.
+[ proxy_url: <string> ]
 
 # TLS configuration.
 tls_config:
@@ -849,8 +902,12 @@ tls_config:
 
 By default every app listed in Marathon will be scraped by Prometheus. If not all
 of your services provide Prometheus metrics, you can use a Marathon label and
-Prometheus relabeling to control which instances will actually be scraped. Also
-by default all apps will show up as a single job in Prometheus (the one specified
+Prometheus relabeling to control which instances will actually be scraped.
+See [the Prometheus marathon-sd configuration file](/documentation/examples/prometheus-marathon.yml)
+for a practical example on how to set up your Marathon app and your Prometheus
+configuration.
+
+By default, all apps will show up as a single job in Prometheus (the one specified
 in the configuration file), which can also be changed using relabeling.
 
 ### `<nerve_sd_config>`
@@ -882,7 +939,7 @@ Serverset SD configurations allow retrieving scrape targets from [Serversets]
 (https://github.com/twitter/finagle/tree/master/finagle-serversets) which are
 stored in [Zookeeper](https://zookeeper.apache.org/). Serversets are commonly
 used by [Finagle](https://twitter.github.io/finagle/) and
-[Aurora](http://aurora.apache.org/).
+[Aurora](https://aurora.apache.org/).
 
 The following meta labels are available on targets during relabeling:
 
@@ -914,10 +971,12 @@ discovery endpoints.
 
 The following meta labels are available on targets during relabeling:
 
-* `__meta_triton_machine_id`: the UUID of the target container
+* `__meta_triton_groups`: the list of groups belonging to the target joined by a comma separator
 * `__meta_triton_machine_alias`: the alias of the target container
+* `__meta_triton_machine_brand`: the brand of the target container
+* `__meta_triton_machine_id`: the UUID of the target container
 * `__meta_triton_machine_image`: the target containers image type
-* `__meta_triton_machine_server_id`: the server UUID for the target container
+* `__meta_triton_server_id`: the server UUID for the target container
 
 ```yaml
 # The information to access the Triton discovery API.
@@ -932,10 +991,15 @@ dns_suffix: <string>
 # often the same value as dns_suffix.
 endpoint: <string>
 
+# A list of groups for which targets are retrieved. If omitted, all containers
+# available to the requesting account are scraped.
+groups:
+  [ - <string> ... ]
+
 # The port to use for discovery and metric scraping.
 [ port: <int> | default = 9163 ]
 
-# The interval which should should be used for refreshing target containers.
+# The interval which should be used for refreshing target containers.
 [ refresh_interval: <duration> | default = 60s ]
 
 # The Triton discovery API version.
@@ -981,7 +1045,8 @@ Additional labels prefixed with `__meta_` may be available during the
 relabeling phase. They are set by the service discovery mechanism that provided
 the target and vary between mechanisms.
 
-Labels starting with `__` will be removed from the label set after relabeling is completed.
+Labels starting with `__` will be removed from the label set after target
+relabeling is completed.
 
 If a relabeling step needs to store a label value only temporarily (as the
 input to a subsequent relabeling step), use the `__tmp` label name prefix. This
@@ -1200,15 +1265,17 @@ tls_config:
 # Configures the queue used to write to remote storage.
 queue_config:
   # Number of samples to buffer per shard before we start dropping them.
-  [ capacity: <int> | default = 100000 ]
+  [ capacity: <int> | default = 10000 ]
   # Maximum number of shards, i.e. amount of concurrency.
   [ max_shards: <int> | default = 1000 ]
+  # Minimum number of shards, i.e. amount of concurrency.
+  [ min_shards: <int> | default = 1 ]
   # Maximum number of samples per send.
   [ max_samples_per_send: <int> | default = 100]
   # Maximum time a sample will wait in buffer.
   [ batch_send_deadline: <duration> | default = 5s ]
   # Maximum number of times to retry a batch on recoverable errors.
-  [ max_retries: <int> | default = 10 ]
+  [ max_retries: <int> | default = 3 ]
   # Initial retry delay. Gets doubled for every retry.
   [ min_backoff: <duration> | default = 30ms ]
   # Maximum retry delay.

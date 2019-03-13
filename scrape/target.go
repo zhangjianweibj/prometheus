@@ -53,11 +53,12 @@ type Target struct {
 	// Additional URL parmeters that are part of the target URL.
 	params url.Values
 
-	mtx        sync.RWMutex
-	lastError  error
-	lastScrape time.Time
-	health     TargetHealth
-	metadata   metricMetadataStore
+	mtx                sync.RWMutex
+	lastError          error
+	lastScrape         time.Time
+	lastScrapeDuration time.Duration
+	health             TargetHealth
+	metadata           metricMetadataStore
 }
 
 // NewTarget creates a reasonably configured target for querying.
@@ -84,6 +85,7 @@ type MetricMetadata struct {
 	Metric string
 	Type   textparse.MetricType
 	Help   string
+	Unit   string
 }
 
 func (t *Target) MetadataList() []MetricMetadata {
@@ -123,12 +125,14 @@ func (t *Target) hash() uint64 {
 }
 
 // offset returns the time until the next scrape cycle for the target.
-func (t *Target) offset(interval time.Duration) time.Duration {
+// It includes the global server jitterSeed for scrapes from multiple Prometheus to try to be at different times.
+func (t *Target) offset(interval time.Duration, jitterSeed uint64) time.Duration {
 	now := time.Now().UnixNano()
 
+	// Base is a pinned to absolute time, no matter how often offset is called.
 	var (
-		base   = now % int64(interval)
-		offset = t.hash() % uint64(interval)
+		base   = int64(interval) - now%int64(interval)
+		offset = (t.hash() ^ jitterSeed) % uint64(interval)
 		next   = base + int64(offset)
 	)
 
@@ -206,6 +210,7 @@ func (t *Target) report(start time.Time, dur time.Duration, err error) {
 
 	t.lastError = err
 	t.lastScrape = start
+	t.lastScrapeDuration = dur
 }
 
 // LastError returns the error encountered during the last scrape.
@@ -222,6 +227,14 @@ func (t *Target) LastScrape() time.Time {
 	defer t.mtx.RUnlock()
 
 	return t.lastScrape
+}
+
+// LastScrapeDuration returns how long the last scrape of the target took.
+func (t *Target) LastScrapeDuration() time.Duration {
+	t.mtx.RLock()
+	defer t.mtx.RUnlock()
+
+	return t.lastScrapeDuration
 }
 
 // Health returns the last known health state of the target.

@@ -14,7 +14,6 @@
 package web
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -29,6 +28,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -38,7 +38,6 @@ import (
 
 	"google.golang.org/grpc"
 
-	pprof_runtime "runtime/pprof"
 	template_text "text/template"
 
 	"github.com/cockroachdb/cmux"
@@ -52,12 +51,12 @@ import (
 	"github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/route"
+	prometheus_tsdb "github.com/prometheus/prometheus/storage/tsdb"
 	"github.com/prometheus/tsdb"
 	"golang.org/x/net/netutil"
 
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/notifier"
-	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/scrape"
@@ -70,6 +69,25 @@ import (
 )
 
 var localhostRepresentations = []string{"127.0.0.1", "localhost"}
+
+// withStackTrace logs the stack trace in case the request panics. The function
+// will re-raise the error which will then be handled by the net/http package.
+// It is needed because the go-kit log package doesn't manage properly the
+// panics from net/http (see https://github.com/go-kit/kit/issues/233).
+func withStackTracer(h http.Handler, l log.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				const size = 64 << 10
+				buf := make([]byte, size)
+				buf = buf[:runtime.Stack(buf, false)]
+				level.Error(l).Log("msg", "panic while serving request", "client", r.RemoteAddr, "url", r.URL, "err", err, "stack", buf)
+				panic(err)
+			}
+		}()
+		h.ServeHTTP(w, r)
+	})
+}
 
 var (
 	requestDuration = prometheus.NewHistogramVec(
@@ -108,20 +126,18 @@ type Handler struct {
 
 	apiV1 *api_v1.API
 
-	router       *route.Router
-	quitCh       chan struct{}
-	reloadCh     chan chan error
-	options      *Options
-	config       *config.Config
-	configString string
-	versionInfo  *PrometheusVersion
-	birth        time.Time
-	cwd          string
-	flagsMap     map[string]string
+	router      *route.Router
+	quitCh      chan struct{}
+	reloadCh    chan chan error
+	options     *Options
+	config      *config.Config
+	versionInfo *PrometheusVersion
+	birth       time.Time
+	cwd         string
+	flagsMap    map[string]string
 
-	externalLabels model.LabelSet
-	mtx            sync.RWMutex
-	now            func() model.Time
+	mtx sync.RWMutex
+	now func() model.Time
 
 	ready uint32 // ready is uint32 rather than boolean to be able to use atomic functions.
 }
@@ -150,6 +166,7 @@ type PrometheusVersion struct {
 type Options struct {
 	Context       context.Context
 	TSDB          func() *tsdb.DB
+	TSDBCfg       prometheus_tsdb.Options
 	Storage       storage.Storage
 	QueryEngine   *promql.Engine
 	ScrapeManager *scrape.Manager
@@ -158,17 +175,27 @@ type Options struct {
 	Version       *PrometheusVersion
 	Flags         map[string]string
 
-	ListenAddress        string
-	ReadTimeout          time.Duration
-	MaxConnections       int
-	ExternalURL          *url.URL
-	RoutePrefix          string
-	UseLocalAssets       bool
-	UserAssetsPath       string
-	ConsoleTemplatesPath string
-	ConsoleLibrariesPath string
-	EnableLifecycle      bool
-	EnableAdminAPI       bool
+	ListenAddress              string
+	CORSOrigin                 *regexp.Regexp
+	ReadTimeout                time.Duration
+	MaxConnections             int
+	ExternalURL                *url.URL
+	RoutePrefix                string
+	UseLocalAssets             bool
+	UserAssetsPath             string
+	ConsoleTemplatesPath       string
+	ConsoleLibrariesPath       string
+	EnableLifecycle            bool
+	EnableAdminAPI             bool
+	PageTitle                  string
+	RemoteReadSampleLimit      int
+	RemoteReadConcurrencyLimit int
+}
+
+func instrumentHandlerWithPrefix(prefix string) func(handlerName string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(handlerName string, handler http.HandlerFunc) http.HandlerFunc {
+		return instrumentHandler(prefix+handlerName, handler)
+	}
 }
 
 func instrumentHandler(handlerName string, handler http.HandlerFunc) http.HandlerFunc {
@@ -225,8 +252,15 @@ func New(logger log.Logger, o *Options) *Handler {
 		},
 		o.Flags,
 		h.testReady,
-		h.options.TSDB,
+		func() api_v1.TSDBAdmin {
+			return h.options.TSDB()
+		},
 		h.options.EnableAdminAPI,
+		logger,
+		h.ruleManager,
+		h.options.RemoteReadSampleLimit,
+		h.options.RemoteReadConcurrencyLimit,
+		h.options.CORSOrigin,
 	)
 
 	if o.RoutePrefix != "/" {
@@ -253,8 +287,6 @@ func New(logger log.Logger, o *Options) *Handler {
 	router.Get("/version", readyf(h.version))
 	router.Get("/service-discovery", readyf(h.serviceDiscovery))
 
-	router.Get("/heap", h.dumpHeap)
-
 	router.Get("/metrics", promhttp.Handler().ServeHTTP)
 
 	router.Get("/federate", readyf(httputil.CompressionHandler{
@@ -263,7 +295,11 @@ func New(logger log.Logger, o *Options) *Handler {
 
 	router.Get("/consoles/*filepath", readyf(h.consoles))
 
-	router.Get("/static/*filepath", h.serveStaticAsset)
+	router.Get("/static/*filepath", func(w http.ResponseWriter, r *http.Request) {
+		r.URL.Path = path.Join("/static", route.Param(r.Context(), "filepath"))
+		fs := http.FileServer(ui.Assets)
+		fs.ServeHTTP(w, r)
+	})
 
 	if o.UserAssetsPath != "" {
 		router.Get("/user/*filepath", route.FileServe(o.UserAssetsPath))
@@ -306,20 +342,6 @@ func New(logger log.Logger, o *Options) *Handler {
 	return h
 }
 
-var corsHeaders = map[string]string{
-	"Access-Control-Allow-Headers":  "Accept, Authorization, Content-Type, Origin",
-	"Access-Control-Allow-Methods":  "GET, OPTIONS",
-	"Access-Control-Allow-Origin":   "*",
-	"Access-Control-Expose-Headers": "Date",
-}
-
-// Enables cross-site script calls.
-func setCORS(w http.ResponseWriter) {
-	for h, v := range corsHeaders {
-		w.Header().Set(h, v)
-	}
-}
-
 func serveDebug(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 	subpath := route.Param(ctx, "subpath")
@@ -348,28 +370,6 @@ func serveDebug(w http.ResponseWriter, req *http.Request) {
 		req.URL.Path = "/debug/pprof/" + subpath
 		pprof.Index(w, req)
 	}
-}
-
-func (h *Handler) serveStaticAsset(w http.ResponseWriter, req *http.Request) {
-	fp := route.Param(req.Context(), "filepath")
-	fp = filepath.Join("web/ui/static", fp)
-
-	info, err := ui.AssetInfo(fp)
-	if err != nil {
-		level.Warn(h.logger).Log("msg", "Could not get file info", "err", err, "file", fp)
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-	file, err := ui.Asset(fp)
-	if err != nil {
-		if err != io.EOF {
-			level.Warn(h.logger).Log("msg", "Could not get file", "err", err, "file", fp)
-		}
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	http.ServeContent(w, req, info.Name(), info.ModTime(), bytes.NewReader(file))
 }
 
 // Ready sets Handler to be ready.
@@ -432,21 +432,12 @@ func (h *Handler) Run(ctx context.Context) error {
 		grpcSrv = grpc.NewServer()
 	)
 	av2 := api_v2.New(
-		time.Now,
 		h.options.TSDB,
-		h.options.QueryEngine,
-		h.options.Storage.Querier,
-		func() []*scrape.Target {
-			return h.options.ScrapeManager.TargetsActive()
-		},
-		func() []*url.URL {
-			return h.options.Notifier.Alertmanagers()
-		},
 		h.options.EnableAdminAPI,
 	)
 	av2.RegisterGRPC(grpcSrv)
 
-	hh, err := av2.HTTPHandler(h.options.ListenAddress)
+	hh, err := av2.HTTPHandler(ctx, h.options.ListenAddress)
 	if err != nil {
 		return err
 	}
@@ -459,7 +450,7 @@ func (h *Handler) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.Handle("/", h.router)
 
-	av1 := route.New().WithInstrumentation(instrumentHandler)
+	av1 := route.New().WithInstrumentation(instrumentHandlerWithPrefix("/api/v1"))
 	h.apiV1.Register(av1)
 	apiPath := "/api"
 	if h.options.RoutePrefix != "/" {
@@ -471,7 +462,7 @@ func (h *Handler) Run(ctx context.Context) error {
 
 	mux.Handle(apiPath+"/", http.StripPrefix(apiPath,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			setCORS(w)
+			httputil.SetCORS(w, h.options.CORSOrigin, r)
 			hhFunc(w, r)
 		}),
 	))
@@ -479,7 +470,7 @@ func (h *Handler) Run(ctx context.Context) error {
 	errlog := stdlog.New(log.NewStdlibAdapter(level.Error(h.logger)), "", 0)
 
 	httpSrv := &http.Server{
-		Handler:     nethttp.Middleware(opentracing.GlobalTracer(), mux, operationName),
+		Handler:     withStackTracer(nethttp.Middleware(opentracing.GlobalTracer(), mux, operationName), h.logger),
 		ErrorLog:    errlog,
 		ReadTimeout: h.options.ReadTimeout,
 	}
@@ -530,6 +521,7 @@ func (h *Handler) consoles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	defer file.Close()
 	text, err := ioutil.ReadAll(file)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -597,6 +589,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		TimeSeriesCount     int64
 		LastConfigTime      time.Time
 		ReloadConfigSuccess bool
+		StorageRetention    string
 	}{
 		Birth:          h.birth,
 		CWD:            h.cwd,
@@ -606,6 +599,17 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		GOMAXPROCS:     runtime.GOMAXPROCS(0),
 		GOGC:           os.Getenv("GOGC"),
 	}
+
+	if h.options.TSDBCfg.RetentionDuration != 0 {
+		status.StorageRetention = h.options.TSDBCfg.RetentionDuration.String()
+	}
+	if h.options.TSDBCfg.MaxBytes != 0 {
+		if status.StorageRetention != "" {
+			status.StorageRetention = status.StorageRetention + " or "
+		}
+		status.StorageRetention = status.StorageRetention + h.options.TSDBCfg.MaxBytes.String()
+	}
+
 	metrics, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("error gathering runtime status: %s", err), http.StatusInternalServerError)
@@ -699,16 +703,15 @@ func (h *Handler) serviceDiscovery(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) targets(w http.ResponseWriter, r *http.Request) {
-	// Bucket targets by job label
-	tps := map[string][]*scrape.Target{}
-	for _, t := range h.scrapeManager.TargetsActive() {
-		job := t.Labels().Get(model.JobLabel)
-		tps[job] = append(tps[job], t)
-	}
-
+	tps := h.scrapeManager.TargetsActive()
 	for _, targets := range tps {
 		sort.Slice(targets, func(i, j int) bool {
-			return targets[i].Labels().Get(labels.InstanceName) < targets[j].Labels().Get(labels.InstanceName)
+			iJobLabel := targets[i].Labels().Get(model.JobLabel)
+			jJobLabel := targets[j].Labels().Get(model.JobLabel)
+			if iJobLabel == jJobLabel {
+				return targets[i].Labels().Get(model.InstanceLabel) < targets[j].Labels().Get(model.InstanceLabel)
+			}
+			return iJobLabel < jJobLabel
 		})
 	}
 
@@ -758,6 +761,7 @@ func tmplFuncs(consolesPath string, opts *Options) template_text.FuncMap {
 		},
 		"consolesPath": func() string { return consolesPath },
 		"pathPrefix":   func() string { return opts.ExternalURL.Path },
+		"pageTitle":    func() string { return opts.PageTitle },
 		"buildVersion": func() string { return opts.Version.Revision },
 		"stripLabels": func(lset map[string]string, labels ...string) map[string]string {
 			for _, ln := range labels {
@@ -813,11 +817,21 @@ func tmplFuncs(consolesPath string, opts *Options) template_text.FuncMap {
 
 			return alive
 		},
-		"healthToClass": func(th scrape.TargetHealth) string {
+		"targetHealthToClass": func(th scrape.TargetHealth) string {
 			switch th {
 			case scrape.HealthUnknown:
 				return "warning"
 			case scrape.HealthGood:
+				return "success"
+			default:
+				return "danger"
+			}
+		},
+		"ruleHealthToClass": func(rh rules.RuleHealth) string {
+			switch rh {
+			case rules.HealthUnknown:
+				return "warning"
+			case rules.HealthGood:
 				return "success"
 			default:
 				return "danger"
@@ -839,15 +853,32 @@ func tmplFuncs(consolesPath string, opts *Options) template_text.FuncMap {
 }
 
 func (h *Handler) getTemplate(name string) (string, error) {
-	baseTmpl, err := ui.Asset("web/ui/templates/_base.html")
+	var tmpl string
+
+	appendf := func(name string) error {
+		f, err := ui.Assets.Open(path.Join("/templates", name))
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		b, err := ioutil.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		tmpl += string(b)
+		return nil
+	}
+
+	err := appendf("_base.html")
 	if err != nil {
 		return "", fmt.Errorf("error reading base template: %s", err)
 	}
-	pageTmpl, err := ui.Asset(filepath.Join("web/ui/templates", name))
+	err = appendf(name)
 	if err != nil {
 		return "", fmt.Errorf("error reading page template %s: %s", name, err)
 	}
-	return string(baseTmpl) + string(pageTmpl), nil
+
+	return tmpl, nil
 }
 
 func (h *Handler) executeTemplate(w http.ResponseWriter, name string, data interface{}) {
@@ -873,18 +904,6 @@ func (h *Handler) executeTemplate(w http.ResponseWriter, name string, data inter
 		return
 	}
 	io.WriteString(w, result)
-}
-
-func (h *Handler) dumpHeap(w http.ResponseWriter, r *http.Request) {
-	target := fmt.Sprintf("/tmp/%d.heap", time.Now().Unix())
-	f, err := os.Create(target)
-	if err != nil {
-		level.Error(h.logger).Log("msg", "Could not dump heap", "err", err)
-	}
-	fmt.Fprintf(w, "Writing to %s...", target)
-	defer f.Close()
-	pprof_runtime.WriteHeapProfile(f)
-	fmt.Fprintf(w, "Done")
 }
 
 // AlertStatus bundles alerting rules and the mapping of alert states to row classes.

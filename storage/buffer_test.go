@@ -106,7 +106,7 @@ func TestBufferedSeriesIterator(t *testing.T) {
 		require.Equal(t, ev, v, "value mismatch")
 	}
 
-	it = NewBuffer(newListSeriesIterator([]sample{
+	it = NewBufferIterator(newListSeriesIterator([]sample{
 		{t: 1, v: 2},
 		{t: 2, v: 3},
 		{t: 3, v: 4},
@@ -157,27 +157,14 @@ func TestBufferedSeriesIteratorNoBadAt(t *testing.T) {
 		err:  func() error { return nil },
 	}
 
-	it := NewBuffer(m, 60)
+	it := NewBufferIterator(m, 60)
 	it.Next()
 	it.Next()
 }
 
 func BenchmarkBufferedSeriesIterator(b *testing.B) {
-	var (
-		samples []sample
-		lastT   int64
-	)
-	for i := 0; i < b.N; i++ {
-		lastT += 30
-
-		samples = append(samples, sample{
-			t: lastT,
-			v: 123, // doesn't matter
-		})
-	}
-
 	// Simulate a 5 minute rate.
-	it := NewBuffer(newListSeriesIterator(samples), 5*60)
+	it := NewBufferIterator(newFakeSeriesIterator(int64(b.N), 30), 5*60)
 
 	b.SetBytes(int64(b.N * 16))
 	b.ReportAllocs()
@@ -253,5 +240,33 @@ func (it *listSeriesIterator) Seek(t int64) bool {
 }
 
 func (it *listSeriesIterator) Err() error {
+	return nil
+}
+
+type fakeSeriesIterator struct {
+	nsamples int64
+	step     int64
+	idx      int64
+}
+
+func newFakeSeriesIterator(nsamples, step int64) *fakeSeriesIterator {
+	return &fakeSeriesIterator{nsamples: nsamples, step: step, idx: -1}
+}
+
+func (it *fakeSeriesIterator) At() (int64, float64) {
+	return it.idx * it.step, 123 // value doesn't matter
+}
+
+func (it *fakeSeriesIterator) Next() bool {
+	it.idx++
+	return it.idx < it.nsamples
+}
+
+func (it *fakeSeriesIterator) Seek(t int64) bool {
+	it.idx = t / it.step
+	return it.idx < it.nsamples
+}
+
+func (it *fakeSeriesIterator) Err() error {
 	return nil
 }

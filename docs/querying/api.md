@@ -18,11 +18,15 @@ and one of the following HTTP response codes:
 
 - `400 Bad Request` when parameters are missing or incorrect.
 - `422 Unprocessable Entity` when an expression can't be executed
-  ([RFC4918](http://tools.ietf.org/html/rfc4918#page-78)).
+  ([RFC4918](https://tools.ietf.org/html/rfc4918#page-78)).
 - `503 Service Unavailable` when queries time out or abort.
 
 Other non-`2xx` codes may be returned for errors occurring before the API
 endpoint is reached.
+
+An array of warnings may be returned if there are errors that do
+not inhibit the request execution. All of the data that was successfully
+collected will be returned in the data field.
 
 The JSON response envelope format is as follows:
 
@@ -34,7 +38,11 @@ The JSON response envelope format is as follows:
   // Only set if status is "error". The data field may still hold
   // additional data.
   "errorType": "<string>",
-  "error": "<string>"
+  "error": "<string>",
+
+  // Only if there were warnings while executing the request.
+  // There will still be data in the data field.
+  "warnings": ["<string>"]
 }
 ```
 
@@ -51,6 +59,8 @@ selectors](basics.md#time-series-selectors) like `http_requests_total` or
 
 `<duration>` placeholders refer to Prometheus duration strings of the form
 `[0-9]+[smhdwy]`. For example, `5m` refers to a duration of 5 minutes.
+
+`<bool>` placeholders refer to boolean values (strings `true` and `false`).
 
 ## Expression queries
 
@@ -234,6 +244,49 @@ $ curl -g 'http://localhost:9090/api/v1/series?match[]=up&match[]=process_start_
 }
 ```
 
+### Getting label names
+
+The following endpoint returns a list of label names:
+
+```
+GET /api/v1/labels
+POST /api/v1/labels
+```
+
+The `data` section of the JSON response is a list of string label names.
+
+Here is an example.
+
+```json
+$ curl 'localhost:9090/api/v1/labels'
+{
+    "status": "success",
+    "data": [
+        "__name__",
+        "call",
+        "code",
+        "config",
+        "dialer_name",
+        "endpoint",
+        "event",
+        "goversion",
+        "handler",
+        "instance",
+        "interval",
+        "job",
+        "le",
+        "listener_name",
+        "name",
+        "quantile",
+        "reason",
+        "role",
+        "scrape_job",
+        "slice",
+        "version"
+    ]
+}
+```
+
 ### Querying label values
 
 The following endpoint returns a list of label values for a provided label name:
@@ -242,7 +295,7 @@ The following endpoint returns a list of label values for a provided label name:
 GET /api/v1/label/<label_name>/values
 ```
 
-The `data` section of the JSON response is a list of string label names.
+The `data` section of the JSON response is a list of string label values.
 
 This example queries for all label values for the `job` label:
 
@@ -363,6 +416,105 @@ $ curl http://localhost:9090/api/v1/targets
 }
 ```
 
+
+## Rules
+
+The `/rules` API endpoint returns a list of alerting and recording rules that
+are currently loaded. In addition it returns the currently active alerts fired
+by the Prometheus instance of each alerting rule.
+
+As the `/rules` endpoint is fairly new, it does not have the same stability
+guarantees as the overarching API v1.
+
+```
+GET /api/v1/rules
+```
+
+```json
+$ curl http://localhost:9090/api/v1/rules
+
+{
+    "data": {
+        "groups": [
+            {
+                "rules": [
+                    {
+                        "alerts": [
+                            {
+                                "activeAt": "2018-07-04T20:27:12.60602144+02:00",
+                                "annotations": {
+                                    "summary": "High request latency"
+                                },
+                                "labels": {
+                                    "alertname": "HighRequestLatency",
+                                    "severity": "page"
+                                },
+                                "state": "firing",
+                                "value": 1
+                            }
+                        ],
+                        "annotations": {
+                            "summary": "High request latency"
+                        },
+                        "duration": 600,
+                        "health": "ok",
+                        "labels": {
+                            "severity": "page"
+                        },
+                        "name": "HighRequestLatency",
+                        "query": "job:request_latency_seconds:mean5m{job=\"myjob\"} > 0.5",
+                        "type": "alerting"
+                    },
+                    {
+                        "health": "ok",
+                        "name": "job:http_inprogress_requests:sum",
+                        "query": "sum(http_inprogress_requests) by (job)",
+                        "type": "recording"
+                    }
+                ],
+                "file": "/rules.yaml",
+                "interval": 60,
+                "name": "example"
+            }
+        ]
+    },
+    "status": "success"
+}
+```
+
+
+## Alerts
+
+The `/alerts` endpoint returns a list of all active alerts.
+
+As the `/alerts` endpoint is fairly new, it does not have the same stability
+guarantees as the overarching API v1.
+
+```
+GET /api/v1/alerts
+```
+
+```json
+$ curl http://localhost:9090/api/v1/alerts
+
+{
+    "data": {
+        "alerts": [
+            {
+                "activeAt": "2018-07-04T20:27:12.60602144+02:00",
+                "annotations": {},
+                "labels": {
+                    "alertname": "my-alert"
+                },
+                "state": "firing",
+                "value": 1
+            }
+        ]
+    },
+    "status": "success"
+}
+```
+
 ## Querying target metadata
 
 The following endpoint returns metadata about metrics currently scraped by targets.
@@ -398,7 +550,8 @@ curl -G http://localhost:9091/api/v1/targets/metadata \
         "job": "prometheus"
       },
       "type": "gauge",
-      "help": "Number of goroutines that currently exist."
+      "help": "Number of goroutines that currently exist.",
+      "unit": ""
     },
     {
       "target": {
@@ -406,7 +559,8 @@ curl -G http://localhost:9091/api/v1/targets/metadata \
         "job": "prometheus"
       },
       "type": "gauge",
-      "help": "Number of goroutines that currently exist."
+      "help": "Number of goroutines that currently exist.",
+      "unit": ""
     }
   ]
 }
@@ -429,7 +583,8 @@ curl -G http://localhost:9091/api/v1/targets/metadata \
       },
       "metric": "prometheus_treecache_zookeeper_failures_total",
       "type": "counter",
-      "help": "The total number of ZooKeeper failures."
+      "help": "The total number of ZooKeeper failures.",
+      "unit": ""
     },
     {
       "target": {
@@ -438,7 +593,8 @@ curl -G http://localhost:9091/api/v1/targets/metadata \
       },
       "metric": "prometheus_tsdb_reloads_total",
       "type": "counter",
-      "help": "Number of times the database reloaded block data from disk."
+      "help": "Number of times the database reloaded block data from disk.",
+      "unit": ""
     },
     // ...
   ]
