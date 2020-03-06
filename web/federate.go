@@ -29,6 +29,7 @@ import (
 	"github.com/prometheus/prometheus/pkg/timestamp"
 	"github.com/prometheus/prometheus/pkg/value"
 	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/storage"
 )
 
@@ -54,7 +55,7 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 
 	var matcherSets [][]*labels.Matcher
 	for _, s := range req.Form["match[]"] {
-		matchers, err := promql.ParseMetricSelector(s)
+		matchers, err := parser.ParseMetricSelector(s)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -63,7 +64,7 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var (
-		mint   = timestamp.FromTime(h.now().Time().Add(-promql.LookbackDelta))
+		mint   = timestamp.FromTime(h.now().Time().Add(-h.lookbackDelta))
 		maxt   = timestamp.FromTime(h.now().Time())
 		format = expfmt.Negotiate(req.Header)
 		enc    = expfmt.NewEncoder(w, format)
@@ -101,7 +102,7 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 	}
 
 	set := storage.NewMergeSeriesSet(sets, nil)
-	it := storage.NewBuffer(int64(promql.LookbackDelta / 1e6))
+	it := storage.NewBuffer(int64(h.lookbackDelta / 1e6))
 	for set.Next() {
 		s := set.At()
 
@@ -136,21 +137,21 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 	}
 	if set.Err() != nil {
 		federationErrors.Inc()
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, set.Err().Error(), http.StatusInternalServerError)
 		return
 	}
 
 	sort.Sort(byName(vec))
 
-	externalLabels := h.config.GlobalConfig.ExternalLabels.Clone()
+	externalLabels := h.config.GlobalConfig.ExternalLabels.Map()
 	if _, ok := externalLabels[model.InstanceLabel]; !ok {
 		externalLabels[model.InstanceLabel] = ""
 	}
-	externalLabelNames := make(model.LabelNames, 0, len(externalLabels))
+	externalLabelNames := make([]string, 0, len(externalLabels))
 	for ln := range externalLabels {
 		externalLabelNames = append(externalLabelNames, ln)
 	}
-	sort.Sort(externalLabelNames)
+	sort.Strings(externalLabelNames)
 
 	var (
 		lastMetricName string
@@ -196,7 +197,7 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 				Name:  proto.String(l.Name),
 				Value: proto.String(l.Value),
 			})
-			if _, ok := externalLabels[model.LabelName(l.Name)]; ok {
+			if _, ok := externalLabels[l.Name]; ok {
 				globalUsed[l.Name] = struct{}{}
 			}
 		}

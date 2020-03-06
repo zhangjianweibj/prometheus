@@ -25,7 +25,6 @@ import (
 
 	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
-	"github.com/stretchr/testify/assert"
 	"gopkg.in/yaml.v2"
 
 	"github.com/prometheus/prometheus/discovery/azure"
@@ -40,6 +39,7 @@ import (
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/prometheus/discovery/triton"
 	"github.com/prometheus/prometheus/discovery/zookeeper"
+	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/pkg/relabel"
 	"github.com/prometheus/prometheus/util/testutil"
 )
@@ -57,10 +57,11 @@ var expectedConf = &Config{
 		ScrapeInterval:     model.Duration(15 * time.Second),
 		ScrapeTimeout:      DefaultGlobalConfig.ScrapeTimeout,
 		EvaluationInterval: model.Duration(30 * time.Second),
+		QueryLogFile:       "",
 
-		ExternalLabels: model.LabelSet{
-			"monitor": "codelab",
-			"foo":     "bar",
+		ExternalLabels: labels.Labels{
+			{Name: "foo", Value: "bar"},
+			{Name: "monitor", Value: "codelab"},
 		},
 	},
 
@@ -73,6 +74,7 @@ var expectedConf = &Config{
 		{
 			URL:           mustParseURL("http://remote1/push"),
 			RemoteTimeout: model.Duration(30 * time.Second),
+			Name:          "drop_expensive",
 			WriteRelabelConfigs: []*relabel.Config{
 				{
 					SourceLabels: model.LabelNames{"__name__"},
@@ -88,6 +90,7 @@ var expectedConf = &Config{
 			URL:           mustParseURL("http://remote2/push"),
 			RemoteTimeout: model.Duration(30 * time.Second),
 			QueueConfig:   DefaultQueueConfig,
+			Name:          "rw_tls",
 			HTTPClientConfig: config_util.HTTPClientConfig{
 				TLSConfig: config_util.TLSConfig{
 					CertFile: filepath.FromSlash("testdata/valid_cert_file"),
@@ -102,11 +105,13 @@ var expectedConf = &Config{
 			URL:           mustParseURL("http://remote1/read"),
 			RemoteTimeout: model.Duration(1 * time.Minute),
 			ReadRecent:    true,
+			Name:          "default",
 		},
 		{
 			URL:              mustParseURL("http://remote3/read"),
 			RemoteTimeout:    model.Duration(1 * time.Minute),
 			ReadRecent:       false,
+			Name:             "read_special",
 			RequiredMatchers: model.LabelSet{"job": "special"},
 			HTTPClientConfig: config_util.HTTPClientConfig{
 				TLSConfig: config_util.TLSConfig{
@@ -121,9 +126,10 @@ var expectedConf = &Config{
 		{
 			JobName: "prometheus",
 
-			HonorLabels:    true,
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  DefaultGlobalConfig.ScrapeTimeout,
+			HonorLabels:     true,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
 
 			MetricsPath: DefaultScrapeConfig.MetricsPath,
 			Scheme:      DefaultScrapeConfig.Scheme,
@@ -193,9 +199,10 @@ var expectedConf = &Config{
 
 			JobName: "service-x",
 
-			ScrapeInterval: model.Duration(50 * time.Second),
-			ScrapeTimeout:  model.Duration(5 * time.Second),
-			SampleLimit:    1000,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(50 * time.Second),
+			ScrapeTimeout:   model.Duration(5 * time.Second),
+			SampleLimit:     1000,
 
 			HTTPClientConfig: config_util.HTTPClientConfig{
 				BasicAuth: &config_util.BasicAuth{
@@ -282,8 +289,9 @@ var expectedConf = &Config{
 		{
 			JobName: "service-y",
 
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  DefaultGlobalConfig.ScrapeTimeout,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
 
 			MetricsPath: DefaultScrapeConfig.MetricsPath,
 			Scheme:      DefaultScrapeConfig.Scheme,
@@ -324,8 +332,9 @@ var expectedConf = &Config{
 		{
 			JobName: "service-z",
 
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  model.Duration(10 * time.Second),
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   model.Duration(10 * time.Second),
 
 			MetricsPath: "/metrics",
 			Scheme:      "http",
@@ -342,8 +351,9 @@ var expectedConf = &Config{
 		{
 			JobName: "service-kubernetes",
 
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  DefaultGlobalConfig.ScrapeTimeout,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
 
 			MetricsPath: DefaultScrapeConfig.MetricsPath,
 			Scheme:      DefaultScrapeConfig.Scheme,
@@ -371,8 +381,9 @@ var expectedConf = &Config{
 		{
 			JobName: "service-kubernetes-namespaces",
 
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  DefaultGlobalConfig.ScrapeTimeout,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
 
 			MetricsPath: DefaultScrapeConfig.MetricsPath,
 			Scheme:      DefaultScrapeConfig.Scheme,
@@ -400,8 +411,9 @@ var expectedConf = &Config{
 		{
 			JobName: "service-marathon",
 
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  DefaultGlobalConfig.ScrapeTimeout,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
 
 			MetricsPath: DefaultScrapeConfig.MetricsPath,
 			Scheme:      DefaultScrapeConfig.Scheme,
@@ -427,8 +439,9 @@ var expectedConf = &Config{
 		{
 			JobName: "service-ec2",
 
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  DefaultGlobalConfig.ScrapeTimeout,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
 
 			MetricsPath: DefaultScrapeConfig.MetricsPath,
 			Scheme:      DefaultScrapeConfig.Scheme,
@@ -459,8 +472,9 @@ var expectedConf = &Config{
 		{
 			JobName: "service-azure",
 
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  DefaultGlobalConfig.ScrapeTimeout,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
 
 			MetricsPath: DefaultScrapeConfig.MetricsPath,
 			Scheme:      DefaultScrapeConfig.Scheme,
@@ -483,8 +497,9 @@ var expectedConf = &Config{
 		{
 			JobName: "service-nerve",
 
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  DefaultGlobalConfig.ScrapeTimeout,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
 
 			MetricsPath: DefaultScrapeConfig.MetricsPath,
 			Scheme:      DefaultScrapeConfig.Scheme,
@@ -502,8 +517,9 @@ var expectedConf = &Config{
 		{
 			JobName: "0123service-xxx",
 
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  DefaultGlobalConfig.ScrapeTimeout,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
 
 			MetricsPath: DefaultScrapeConfig.MetricsPath,
 			Scheme:      DefaultScrapeConfig.Scheme,
@@ -520,10 +536,32 @@ var expectedConf = &Config{
 			},
 		},
 		{
+			JobName: "badfederation",
+
+			HonorTimestamps: false,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
+
+			MetricsPath: "/federate",
+			Scheme:      DefaultScrapeConfig.Scheme,
+
+			ServiceDiscoveryConfig: sd_config.ServiceDiscoveryConfig{
+				StaticConfigs: []*targetgroup.Group{
+					{
+						Targets: []model.LabelSet{
+							{model.AddressLabel: "localhost:9090"},
+						},
+						Source: "0",
+					},
+				},
+			},
+		},
+		{
 			JobName: "測試",
 
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  DefaultGlobalConfig.ScrapeTimeout,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
 
 			MetricsPath: DefaultScrapeConfig.MetricsPath,
 			Scheme:      DefaultScrapeConfig.Scheme,
@@ -542,8 +580,9 @@ var expectedConf = &Config{
 		{
 			JobName: "service-triton",
 
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  DefaultGlobalConfig.ScrapeTimeout,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
 
 			MetricsPath: DefaultScrapeConfig.MetricsPath,
 			Scheme:      DefaultScrapeConfig.Scheme,
@@ -569,8 +608,9 @@ var expectedConf = &Config{
 		{
 			JobName: "service-openstack",
 
-			ScrapeInterval: model.Duration(15 * time.Second),
-			ScrapeTimeout:  DefaultGlobalConfig.ScrapeTimeout,
+			HonorTimestamps: true,
+			ScrapeInterval:  model.Duration(15 * time.Second),
+			ScrapeTimeout:   DefaultGlobalConfig.ScrapeTimeout,
 
 			MetricsPath: DefaultScrapeConfig.MetricsPath,
 			Scheme:      DefaultScrapeConfig.Scheme,
@@ -595,8 +635,9 @@ var expectedConf = &Config{
 	AlertingConfig: AlertingConfig{
 		AlertmanagerConfigs: []*AlertmanagerConfig{
 			{
-				Scheme:  "https",
-				Timeout: model.Duration(10 * time.Second),
+				Scheme:     "https",
+				Timeout:    model.Duration(10 * time.Second),
+				APIVersion: AlertmanagerAPIVersionV1,
 				ServiceDiscoveryConfig: sd_config.ServiceDiscoveryConfig{
 					StaticConfigs: []*targetgroup.Group{
 						{
@@ -625,7 +666,16 @@ func TestLoadConfig(t *testing.T) {
 	testutil.Ok(t, err)
 
 	expectedConf.original = c.original
-	assert.Equal(t, expectedConf, c)
+	testutil.Equals(t, expectedConf, c)
+}
+
+func TestScrapeIntervalLarger(t *testing.T) {
+	c, err := LoadFile("testdata/scrape_interval_larger.good.yml")
+	testutil.Ok(t, err)
+	testutil.Equals(t, 1, len(c.ScrapeConfigs))
+	for _, sc := range c.ScrapeConfigs {
+		testutil.Equals(t, true, sc.ScrapeInterval >= sc.ScrapeTimeout)
+	}
 }
 
 // YAML marshaling must not reveal authentication credentials.
@@ -659,6 +709,19 @@ func TestKubernetesEmptyAPIServer(t *testing.T) {
 	testutil.Ok(t, err)
 }
 
+func TestKubernetesSelectors(t *testing.T) {
+	_, err := LoadFile("testdata/kubernetes_selectors_endpoints.good.yml")
+	testutil.Ok(t, err)
+	_, err = LoadFile("testdata/kubernetes_selectors_node.good.yml")
+	testutil.Ok(t, err)
+	_, err = LoadFile("testdata/kubernetes_selectors_ingress.good.yml")
+	testutil.Ok(t, err)
+	_, err = LoadFile("testdata/kubernetes_selectors_pod.good.yml")
+	testutil.Ok(t, err)
+	_, err = LoadFile("testdata/kubernetes_selectors_service.good.yml")
+	testutil.Ok(t, err)
+}
+
 var expectedErrors = []struct {
 	filename string
 	errMsg   string
@@ -678,6 +741,9 @@ var expectedErrors = []struct {
 	}, {
 		filename: "labelname2.bad.yml",
 		errMsg:   `"not:allowed" is not a valid label name`,
+	}, {
+		filename: "labelvalue.bad.yml",
+		errMsg:   `"\xff" is not a valid label value`,
 	}, {
 		filename: "regex.bad.yml",
 		errMsg:   "error parsing regexp",
@@ -739,8 +805,29 @@ var expectedErrors = []struct {
 		filename: "kubernetes_role.bad.yml",
 		errMsg:   "role",
 	}, {
+		filename: "kubernetes_selectors_endpoints.bad.yml",
+		errMsg:   "endpoints role supports only pod, service, endpoints selectors",
+	}, {
+		filename: "kubernetes_selectors_ingress.bad.yml",
+		errMsg:   "ingress role supports only ingress selectors",
+	}, {
+		filename: "kubernetes_selectors_node.bad.yml",
+		errMsg:   "node role supports only node selectors",
+	}, {
+		filename: "kubernetes_selectors_pod.bad.yml",
+		errMsg:   "pod role supports only pod selectors",
+	}, {
+		filename: "kubernetes_selectors_service.bad.yml",
+		errMsg:   "service role supports only service selectors",
+	}, {
 		filename: "kubernetes_namespace_discovery.bad.yml",
 		errMsg:   "field foo not found in type kubernetes.plain",
+	}, {
+		filename: "kubernetes_selectors_duplicated_role.bad.yml",
+		errMsg:   "duplicated selector role: pod",
+	}, {
+		filename: "kubernetes_selectors_incorrect_selector.bad.yml",
+		errMsg:   "invalid selector: 'metadata.status-Running'; can't understand 'metadata.status-Running'",
 	}, {
 		filename: "kubernetes_bearertoken_basicauth.bad.yml",
 		errMsg:   "at most one of basic_auth, bearer_token & bearer_token_file must be configured",
@@ -777,6 +864,12 @@ var expectedErrors = []struct {
 	}, {
 		filename: "remote_write_url_missing.bad.yml",
 		errMsg:   `url for remote_write is empty`,
+	}, {
+		filename: "remote_write_dup.bad.yml",
+		errMsg:   `found multiple remote write configs with job name "queue1"`,
+	}, {
+		filename: "remote_read_dup.bad.yml",
+		errMsg:   `found multiple remote read configs with job name "queue1"`,
 	},
 	{
 		filename: "ec2_filters_empty_values.bad.yml",
@@ -858,7 +951,7 @@ func TestBadStaticConfigsJSON(t *testing.T) {
 	testutil.Ok(t, err)
 	var tg targetgroup.Group
 	err = json.Unmarshal(content, &tg)
-	testutil.NotOk(t, err, "")
+	testutil.NotOk(t, err)
 }
 
 func TestBadStaticConfigsYML(t *testing.T) {
@@ -866,7 +959,7 @@ func TestBadStaticConfigsYML(t *testing.T) {
 	testutil.Ok(t, err)
 	var tg targetgroup.Group
 	err = yaml.UnmarshalStrict(content, &tg)
-	testutil.NotOk(t, err, "")
+	testutil.NotOk(t, err)
 }
 
 func TestEmptyConfig(t *testing.T) {

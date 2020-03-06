@@ -14,8 +14,6 @@
 package storage
 
 import (
-	"math"
-
 	"github.com/prometheus/prometheus/pkg/labels"
 )
 
@@ -30,12 +28,16 @@ func (noopQuerier) Select(*SelectParams, ...*labels.Matcher) (SeriesSet, Warning
 	return NoopSeriesSet(), nil, nil
 }
 
-func (noopQuerier) LabelValues(name string) ([]string, error) {
-	return nil, nil
+func (noopQuerier) SelectSorted(*SelectParams, ...*labels.Matcher) (SeriesSet, Warnings, error) {
+	return NoopSeriesSet(), nil, nil
 }
 
-func (noopQuerier) LabelNames() ([]string, error) {
-	return nil, nil
+func (noopQuerier) LabelValues(name string) ([]string, Warnings, error) {
+	return nil, nil, nil
+}
+
+func (noopQuerier) LabelNames() ([]string, Warnings, error) {
+	return nil, nil, nil
 }
 
 func (noopQuerier) Close() error {
@@ -49,35 +51,8 @@ func NoopSeriesSet() SeriesSet {
 	return noopSeriesSet{}
 }
 
-func (noopSeriesSet) Next() bool {
-	return false
-}
+func (noopSeriesSet) Next() bool { return false }
 
-func (noopSeriesSet) At() Series {
-	return nil
-}
+func (noopSeriesSet) At() Series { return nil }
 
-func (noopSeriesSet) Err() error {
-	return nil
-}
-
-type noopSeriesIterator struct{}
-
-// NoopSeriesIt is a SeriesIterator that does nothing.
-var NoopSeriesIt = noopSeriesIterator{}
-
-func (noopSeriesIterator) At() (int64, float64) {
-	return math.MinInt64, 0
-}
-
-func (noopSeriesIterator) Seek(t int64) bool {
-	return false
-}
-
-func (noopSeriesIterator) Next() bool {
-	return false
-}
-
-func (noopSeriesIterator) Err() error {
-	return nil
-}
+func (noopSeriesSet) Err() error { return nil }

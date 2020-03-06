@@ -25,6 +25,8 @@ type swaggerInfoObject struct {
 
 	Contact *swaggerContactObject `json:"contact,omitempty"`
 	License *swaggerLicenseObject `json:"license,omitempty"`
+
+	extensions []extension
 }
 
 // http://swagger.io/specification/#contactObject
@@ -46,13 +48,18 @@ type swaggerExternalDocumentationObject struct {
 	URL         string `json:"url,omitempty"`
 }
 
+type extension struct {
+	key   string
+	value json.RawMessage
+}
+
 // http://swagger.io/specification/#swaggerObject
 type swaggerObject struct {
 	Swagger             string                              `json:"swagger"`
 	Info                swaggerInfoObject                   `json:"info"`
 	Host                string                              `json:"host,omitempty"`
 	BasePath            string                              `json:"basePath,omitempty"`
-	Schemes             []string                            `json:"schemes"`
+	Schemes             []string                            `json:"schemes,omitempty"`
 	Consumes            []string                            `json:"consumes"`
 	Produces            []string                            `json:"produces"`
 	Paths               swaggerPathsObject                  `json:"paths"`
@@ -60,6 +67,8 @@ type swaggerObject struct {
 	SecurityDefinitions swaggerSecurityDefinitionsObject    `json:"securityDefinitions,omitempty"`
 	Security            []swaggerSecurityRequirementObject  `json:"security,omitempty"`
 	ExternalDocs        *swaggerExternalDocumentationObject `json:"externalDocs,omitempty"`
+
+	extensions []extension
 }
 
 // http://swagger.io/specification/#securityDefinitionsObject
@@ -75,6 +84,8 @@ type swaggerSecuritySchemeObject struct {
 	AuthorizationURL string              `json:"authorizationUrl,omitempty"`
 	TokenURL         string              `json:"tokenUrl,omitempty"`
 	Scopes           swaggerScopesObject `json:"scopes,omitempty"`
+
+	extensions []extension
 }
 
 // http://swagger.io/specification/#scopesObject
@@ -107,6 +118,8 @@ type swaggerOperationObject struct {
 
 	Security     *[]swaggerSecurityRequirementObject `json:"security,omitempty"`
 	ExternalDocs *swaggerExternalDocumentationObject `json:"externalDocs,omitempty"`
+
+	extensions []extension
 }
 
 type swaggerParametersObject []swaggerParameterObject
@@ -133,9 +146,10 @@ type swaggerParameterObject struct {
 // core part of schema, which is common to itemsObject and schemaObject.
 // http://swagger.io/specification/#itemsObject
 type schemaCore struct {
-	Type   string `json:"type,omitempty"`
-	Format string `json:"format,omitempty"`
-	Ref    string `json:"$ref,omitempty"`
+	Type    string          `json:"type,omitempty"`
+	Format  string          `json:"format,omitempty"`
+	Ref     string          `json:"$ref,omitempty"`
+	Example json.RawMessage `json:"example,omitempty"`
 
 	Items *swaggerItemsObject `json:"items,omitempty"`
 
@@ -148,20 +162,16 @@ type schemaCore struct {
 
 type swaggerItemsObject schemaCore
 
-func (o *swaggerItemsObject) getType() string {
-	if o == nil {
-		return ""
-	}
-	return o.Type
-}
-
 // http://swagger.io/specification/#responsesObject
 type swaggerResponsesObject map[string]swaggerResponseObject
 
 // http://swagger.io/specification/#responseObject
 type swaggerResponseObject struct {
-	Description string              `json:"description"`
-	Schema      swaggerSchemaObject `json:"schema"`
+	Description string                 `json:"description"`
+	Schema      swaggerSchemaObject    `json:"schema"`
+	Examples    map[string]interface{} `json:"examples,omitempty"`
+
+	extensions []extension
 }
 
 type keyVal struct {
@@ -207,6 +217,7 @@ type swaggerSchemaObject struct {
 
 	ExternalDocs *swaggerExternalDocumentationObject `json:"externalDocs,omitempty"`
 
+	ReadOnly         bool     `json:"readOnly,omitempty"`
 	MultipleOf       float64  `json:"multipleOf,omitempty"`
 	Maximum          float64  `json:"maximum,omitempty"`
 	ExclusiveMaximum bool     `json:"exclusiveMaximum,omitempty"`

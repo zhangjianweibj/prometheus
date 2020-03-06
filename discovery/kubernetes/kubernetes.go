@@ -15,19 +15,21 @@ package kubernetes
 
 import (
 	"context"
-	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 	apiv1 "k8s.io/api/core/v1"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
@@ -43,6 +45,7 @@ const (
 	metaLabelPrefix  = model.MetaLabelPrefix + "kubernetes_"
 	namespaceLabel   = metaLabelPrefix + "namespace"
 	metricsNamespace = "prometheus_sd_kubernetes"
+	presentValue     = model.LabelValue("true")
 )
 
 var (
@@ -80,7 +83,7 @@ func (c *Role) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	case RoleNode, RolePod, RoleService, RoleEndpoint, RoleIngress:
 		return nil
 	default:
-		return fmt.Errorf("unknown Kubernetes SD role %q", *c)
+		return errors.Errorf("unknown Kubernetes SD role %q", *c)
 	}
 }
 
@@ -90,6 +93,26 @@ type SDConfig struct {
 	Role               Role                         `yaml:"role"`
 	HTTPClientConfig   config_util.HTTPClientConfig `yaml:",inline"`
 	NamespaceDiscovery NamespaceDiscovery           `yaml:"namespaces,omitempty"`
+	Selectors          []SelectorConfig             `yaml:"selectors,omitempty"`
+}
+
+type roleSelector struct {
+	node      resourceSelector
+	pod       resourceSelector
+	service   resourceSelector
+	endpoints resourceSelector
+	ingress   resourceSelector
+}
+
+type SelectorConfig struct {
+	Role  Role   `yaml:"role,omitempty"`
+	Label string `yaml:"label,omitempty"`
+	Field string `yaml:"field,omitempty"`
+}
+
+type resourceSelector struct {
+	label string
+	field string
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
@@ -101,14 +124,54 @@ func (c *SDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return err
 	}
 	if c.Role == "" {
-		return fmt.Errorf("role missing (one of: pod, service, endpoints, node, ingress)")
+		return errors.Errorf("role missing (one of: pod, service, endpoints, node, ingress)")
 	}
 	err = c.HTTPClientConfig.Validate()
 	if err != nil {
 		return err
 	}
 	if c.APIServer.URL == nil && !reflect.DeepEqual(c.HTTPClientConfig, config_util.HTTPClientConfig{}) {
-		return fmt.Errorf("to use custom HTTP client configuration please provide the 'api_server' URL explicitly")
+		return errors.Errorf("to use custom HTTP client configuration please provide the 'api_server' URL explicitly")
+	}
+
+	foundSelectorRoles := make(map[Role]struct{})
+	allowedSelectors := map[Role][]string{
+		RolePod:      {string(RolePod)},
+		RoleService:  {string(RoleService)},
+		RoleEndpoint: {string(RolePod), string(RoleService), string(RoleEndpoint)},
+		RoleNode:     {string(RoleNode)},
+		RoleIngress:  {string(RoleIngress)},
+	}
+
+	for _, selector := range c.Selectors {
+		if _, ok := foundSelectorRoles[selector.Role]; ok {
+			return errors.Errorf("duplicated selector role: %s", selector.Role)
+		}
+		foundSelectorRoles[selector.Role] = struct{}{}
+
+		if _, ok := allowedSelectors[c.Role]; !ok {
+			return errors.Errorf("invalid role: %q, expecting one of: pod, service, endpoints, node or ingress", c.Role)
+		}
+		var allowed bool
+		for _, role := range allowedSelectors[c.Role] {
+			if role == string(selector.Role) {
+				allowed = true
+				break
+			}
+		}
+
+		if !allowed {
+			return errors.Errorf("%s role supports only %s selectors", c.Role, strings.Join(allowedSelectors[c.Role], ", "))
+		}
+
+		_, err := fields.ParseSelector(selector.Field)
+		if err != nil {
+			return err
+		}
+		_, err = fields.ParseSelector(selector.Label)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -138,12 +201,10 @@ func init() {
 
 	var (
 		clientGoRequestMetricAdapterInstance     = clientGoRequestMetricAdapter{}
-		clientGoCacheMetricsProviderInstance     = clientGoCacheMetricsProvider{}
 		clientGoWorkqueueMetricsProviderInstance = clientGoWorkqueueMetricsProvider{}
 	)
 
 	clientGoRequestMetricAdapterInstance.Register(prometheus.DefaultRegisterer)
-	clientGoCacheMetricsProviderInstance.Register(prometheus.DefaultRegisterer)
 	clientGoWorkqueueMetricsProviderInstance.Register(prometheus.DefaultRegisterer)
 
 }
@@ -162,6 +223,7 @@ type Discovery struct {
 	logger             log.Logger
 	namespaceDiscovery *NamespaceDiscovery
 	discoverers        []discoverer
+	selectors          roleSelector
 }
 
 func (d *Discovery) getNamespaces() []string {
@@ -190,7 +252,7 @@ func New(l log.Logger, conf *SDConfig) (*Discovery, error) {
 		}
 		level.Info(l).Log("msg", "Using pod service account via in-cluster config")
 	} else {
-		rt, err := config_util.NewRoundTripperFromConfig(conf.HTTPClientConfig, "kubernetes_sd")
+		rt, err := config_util.NewRoundTripperFromConfig(conf.HTTPClientConfig, "kubernetes_sd", false)
 		if err != nil {
 			return nil, err
 		}
@@ -212,7 +274,32 @@ func New(l log.Logger, conf *SDConfig) (*Discovery, error) {
 		role:               conf.Role,
 		namespaceDiscovery: &conf.NamespaceDiscovery,
 		discoverers:        make([]discoverer, 0),
+		selectors:          mapSelector(conf.Selectors),
 	}, nil
+}
+
+func mapSelector(rawSelector []SelectorConfig) roleSelector {
+	rs := roleSelector{}
+	for _, resourceSelectorRaw := range rawSelector {
+		switch resourceSelectorRaw.Role {
+		case RoleEndpoint:
+			rs.endpoints.field = resourceSelectorRaw.Field
+			rs.endpoints.label = resourceSelectorRaw.Label
+		case RoleIngress:
+			rs.ingress.field = resourceSelectorRaw.Field
+			rs.ingress.label = resourceSelectorRaw.Label
+		case RoleNode:
+			rs.node.field = resourceSelectorRaw.Field
+			rs.node.label = resourceSelectorRaw.Label
+		case RolePod:
+			rs.pod.field = resourceSelectorRaw.Field
+			rs.pod.label = resourceSelectorRaw.Label
+		case RoleService:
+			rs.service.field = resourceSelectorRaw.Field
+			rs.service.label = resourceSelectorRaw.Label
+		}
+	}
+	return rs
 }
 
 const resyncPeriod = 10 * time.Minute
@@ -228,27 +315,39 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 			e := d.client.CoreV1().Endpoints(namespace)
 			elw := &cache.ListWatch{
 				ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+					options.FieldSelector = d.selectors.endpoints.field
+					options.LabelSelector = d.selectors.endpoints.label
 					return e.List(options)
 				},
 				WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+					options.FieldSelector = d.selectors.endpoints.field
+					options.LabelSelector = d.selectors.endpoints.label
 					return e.Watch(options)
 				},
 			}
 			s := d.client.CoreV1().Services(namespace)
 			slw := &cache.ListWatch{
 				ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+					options.FieldSelector = d.selectors.service.field
+					options.LabelSelector = d.selectors.service.label
 					return s.List(options)
 				},
 				WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+					options.FieldSelector = d.selectors.service.field
+					options.LabelSelector = d.selectors.service.label
 					return s.Watch(options)
 				},
 			}
 			p := d.client.CoreV1().Pods(namespace)
 			plw := &cache.ListWatch{
 				ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+					options.FieldSelector = d.selectors.pod.field
+					options.LabelSelector = d.selectors.pod.label
 					return p.List(options)
 				},
 				WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+					options.FieldSelector = d.selectors.pod.field
+					options.LabelSelector = d.selectors.pod.label
 					return p.Watch(options)
 				},
 			}
@@ -268,9 +367,13 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 			p := d.client.CoreV1().Pods(namespace)
 			plw := &cache.ListWatch{
 				ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+					options.FieldSelector = d.selectors.pod.field
+					options.LabelSelector = d.selectors.pod.label
 					return p.List(options)
 				},
 				WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+					options.FieldSelector = d.selectors.pod.field
+					options.LabelSelector = d.selectors.pod.label
 					return p.Watch(options)
 				},
 			}
@@ -286,9 +389,13 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 			s := d.client.CoreV1().Services(namespace)
 			slw := &cache.ListWatch{
 				ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+					options.FieldSelector = d.selectors.service.field
+					options.LabelSelector = d.selectors.service.label
 					return s.List(options)
 				},
 				WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+					options.FieldSelector = d.selectors.service.field
+					options.LabelSelector = d.selectors.service.label
 					return s.Watch(options)
 				},
 			}
@@ -304,9 +411,13 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 			i := d.client.ExtensionsV1beta1().Ingresses(namespace)
 			ilw := &cache.ListWatch{
 				ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+					options.FieldSelector = d.selectors.ingress.field
+					options.LabelSelector = d.selectors.ingress.label
 					return i.List(options)
 				},
 				WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+					options.FieldSelector = d.selectors.ingress.field
+					options.LabelSelector = d.selectors.ingress.label
 					return i.Watch(options)
 				},
 			}
@@ -320,9 +431,13 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 	case RoleNode:
 		nlw := &cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+				options.FieldSelector = d.selectors.node.field
+				options.LabelSelector = d.selectors.node.label
 				return d.client.CoreV1().Nodes().List(options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+				options.FieldSelector = d.selectors.node.field
+				options.LabelSelector = d.selectors.node.label
 				return d.client.CoreV1().Nodes().Watch(options)
 			},
 		}
@@ -355,7 +470,7 @@ func lv(s string) model.LabelValue {
 	return model.LabelValue(s)
 }
 
-func send(ctx context.Context, l log.Logger, role Role, ch chan<- []*targetgroup.Group, tg *targetgroup.Group) {
+func send(ctx context.Context, ch chan<- []*targetgroup.Group, tg *targetgroup.Group) {
 	if tg == nil {
 		return
 	}

@@ -17,14 +17,15 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"time"
 
 	"github.com/go-kit/kit/log"
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/openstack"
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/hypervisors"
 	"github.com/gophercloud/gophercloud/pagination"
+	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
+
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 )
 
@@ -45,33 +46,24 @@ type HypervisorDiscovery struct {
 	port     int
 }
 
-// NewHypervisorDiscovery returns a new hypervisor discovery.
-func NewHypervisorDiscovery(provider *gophercloud.ProviderClient, opts *gophercloud.AuthOptions,
+// newHypervisorDiscovery returns a new hypervisor discovery.
+func newHypervisorDiscovery(provider *gophercloud.ProviderClient, opts *gophercloud.AuthOptions,
 	port int, region string, l log.Logger) *HypervisorDiscovery {
 	return &HypervisorDiscovery{provider: provider, authOpts: opts,
 		region: region, port: port, logger: l}
 }
 
-func (h *HypervisorDiscovery) refresh(ctx context.Context) (*targetgroup.Group, error) {
-	var err error
-	t0 := time.Now()
-	defer func() {
-		refreshDuration.Observe(time.Since(t0).Seconds())
-		if err != nil {
-			refreshFailuresCount.Inc()
-		}
-	}()
-
+func (h *HypervisorDiscovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 	h.provider.Context = ctx
-	err = openstack.Authenticate(h.provider, *h.authOpts)
+	err := openstack.Authenticate(h.provider, *h.authOpts)
 	if err != nil {
-		return nil, fmt.Errorf("could not authenticate to OpenStack: %s", err)
+		return nil, errors.Wrap(err, "could not authenticate to OpenStack")
 	}
 	client, err := openstack.NewComputeV2(h.provider, gophercloud.EndpointOpts{
 		Region: h.region,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("could not create OpenStack compute session: %s", err)
+		return nil, errors.Wrap(err, "could not create OpenStack compute session")
 	}
 
 	tg := &targetgroup.Group{
@@ -83,7 +75,7 @@ func (h *HypervisorDiscovery) refresh(ctx context.Context) (*targetgroup.Group, 
 	err = pagerHypervisors.EachPage(func(page pagination.Page) (bool, error) {
 		hypervisorList, err := hypervisors.ExtractHypervisors(page)
 		if err != nil {
-			return false, fmt.Errorf("could not extract hypervisors: %s", err)
+			return false, errors.Wrap(err, "could not extract hypervisors")
 		}
 		for _, hypervisor := range hypervisorList {
 			labels := model.LabelSet{}
@@ -102,5 +94,5 @@ func (h *HypervisorDiscovery) refresh(ctx context.Context) (*targetgroup.Group, 
 		return nil, err
 	}
 
-	return tg, nil
+	return []*targetgroup.Group{tg}, nil
 }

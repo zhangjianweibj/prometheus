@@ -16,7 +16,12 @@
 
 package promql
 
-import "github.com/prometheus/prometheus/pkg/textparse"
+import (
+	"io"
+
+	"github.com/prometheus/prometheus/pkg/textparse"
+	"github.com/prometheus/prometheus/promql/parser"
+)
 
 // PromQL parser fuzzing instrumentation for use with
 // https://github.com/dvyukov/go-fuzz.
@@ -32,7 +37,7 @@ import "github.com/prometheus/prometheus/pkg/textparse"
 //
 // Further input samples should go in the folders fuzz-data/ParseMetric/corpus.
 //
-// Repeat for ParseMetricSeletion, ParseExpr and ParseStmt.
+// Repeat for FuzzParseOpenMetric, FuzzParseMetricSelector and FuzzParseExpr.
 
 // Tuning which value is returned from Fuzz*-functions has a strong influence
 // on how quick the fuzzer converges on "interesting" cases. At least try
@@ -45,25 +50,41 @@ const (
 	fuzzDiscard     = -1
 )
 
-// Fuzz the metric parser.
-//
-// Note that his is not the parser for the text-based exposition-format; that
-// lives in github.com/prometheus/client_golang/text.
-func FuzzParseMetric(in []byte) int {
-	p := textparse.New(in)
-	for p.Next() {
+func fuzzParseMetricWithContentType(in []byte, contentType string) int {
+	p := textparse.New(in, contentType)
+	var err error
+	for {
+		_, err = p.Next()
+		if err != nil {
+			break
+		}
+	}
+	if err == io.EOF {
+		err = nil
 	}
 
-	if p.Err() == nil {
+	if err == nil {
 		return fuzzInteresting
 	}
 
 	return fuzzMeh
 }
 
+// Fuzz the metric parser.
+//
+// Note that this is not the parser for the text-based exposition-format; that
+// lives in github.com/prometheus/client_golang/text.
+func FuzzParseMetric(in []byte) int {
+	return fuzzParseMetricWithContentType(in, "")
+}
+
+func FuzzParseOpenMetric(in []byte) int {
+	return fuzzParseMetricWithContentType(in, "application/openmetrics-text")
+}
+
 // Fuzz the metric selector parser.
 func FuzzParseMetricSelector(in []byte) int {
-	_, err := ParseMetricSelector(string(in))
+	_, err := parser.ParseMetricSelector(string(in))
 	if err == nil {
 		return fuzzInteresting
 	}
@@ -73,17 +94,7 @@ func FuzzParseMetricSelector(in []byte) int {
 
 // Fuzz the expression parser.
 func FuzzParseExpr(in []byte) int {
-	_, err := ParseExpr(string(in))
-	if err == nil {
-		return fuzzInteresting
-	}
-
-	return fuzzMeh
-}
-
-// Fuzz the parser.
-func FuzzParseStmts(in []byte) int {
-	_, err := ParseStmts(string(in))
+	_, err := parser.ParseExpr(string(in))
 	if err == nil {
 		return fuzzInteresting
 	}

@@ -25,53 +25,42 @@ import (
 	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/pkg/errors"
+	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 
-	"github.com/aws/aws-sdk-go/service/ec2"
-	config_util "github.com/prometheus/common/config"
+	"github.com/prometheus/prometheus/discovery/refresh"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/prometheus/util/strutil"
 )
 
 const (
-	ec2Label                = model.MetaLabelPrefix + "ec2_"
-	ec2LabelAZ              = ec2Label + "availability_zone"
-	ec2LabelInstanceID      = ec2Label + "instance_id"
-	ec2LabelInstanceState   = ec2Label + "instance_state"
-	ec2LabelInstanceType    = ec2Label + "instance_type"
-	ec2LabelOwnerID         = ec2Label + "owner_id"
-	ec2LabelPlatform        = ec2Label + "platform"
-	ec2LabelPublicDNS       = ec2Label + "public_dns_name"
-	ec2LabelPublicIP        = ec2Label + "public_ip"
-	ec2LabelPrivateDNS      = ec2Label + "private_dns_name"
-	ec2LabelPrivateIP       = ec2Label + "private_ip"
-	ec2LabelPrimarySubnetID = ec2Label + "primary_subnet_id"
-	ec2LabelSubnetID        = ec2Label + "subnet_id"
-	ec2LabelTag             = ec2Label + "tag_"
-	ec2LabelVPCID           = ec2Label + "vpc_id"
-	subnetSeparator         = ","
+	ec2Label                  = model.MetaLabelPrefix + "ec2_"
+	ec2LabelAZ                = ec2Label + "availability_zone"
+	ec2LabelInstanceID        = ec2Label + "instance_id"
+	ec2LabelInstanceState     = ec2Label + "instance_state"
+	ec2LabelInstanceType      = ec2Label + "instance_type"
+	ec2LabelInstanceLifecycle = ec2Label + "instance_lifecycle"
+	ec2LabelOwnerID           = ec2Label + "owner_id"
+	ec2LabelPlatform          = ec2Label + "platform"
+	ec2LabelPublicDNS         = ec2Label + "public_dns_name"
+	ec2LabelPublicIP          = ec2Label + "public_ip"
+	ec2LabelPrivateDNS        = ec2Label + "private_dns_name"
+	ec2LabelPrivateIP         = ec2Label + "private_ip"
+	ec2LabelPrimarySubnetID   = ec2Label + "primary_subnet_id"
+	ec2LabelSubnetID          = ec2Label + "subnet_id"
+	ec2LabelTag               = ec2Label + "tag_"
+	ec2LabelVPCID             = ec2Label + "vpc_id"
+	subnetSeparator           = ","
 )
 
-var (
-	ec2SDRefreshFailuresCount = prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name: "prometheus_sd_ec2_refresh_failures_total",
-			Help: "The number of EC2-SD scrape failures.",
-		})
-	ec2SDRefreshDuration = prometheus.NewSummary(
-		prometheus.SummaryOpts{
-			Name: "prometheus_sd_ec2_refresh_duration_seconds",
-			Help: "The duration of a EC2-SD refresh in seconds.",
-		})
-	// DefaultSDConfig is the default EC2 SD configuration.
-	DefaultSDConfig = SDConfig{
-		Port:            80,
-		RefreshInterval: model.Duration(60 * time.Second),
-	}
-)
+// DefaultSDConfig is the default EC2 SD configuration.
+var DefaultSDConfig = SDConfig{
+	Port:            80,
+	RefreshInterval: model.Duration(60 * time.Second),
+}
 
 // Filter is the configuration for filtering EC2 instances.
 type Filter struct {
@@ -108,33 +97,28 @@ func (c *SDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		metadata := ec2metadata.New(sess)
 		region, err := metadata.Region()
 		if err != nil {
-			return fmt.Errorf("EC2 SD configuration requires a region")
+			return errors.New("EC2 SD configuration requires a region")
 		}
 		c.Region = region
 	}
 	for _, f := range c.Filters {
 		if len(f.Values) == 0 {
-			return fmt.Errorf("EC2 SD configuration filter values cannot be empty")
+			return errors.New("EC2 SD configuration filter values cannot be empty")
 		}
 	}
 	return nil
 }
 
-func init() {
-	prometheus.MustRegister(ec2SDRefreshFailuresCount)
-	prometheus.MustRegister(ec2SDRefreshDuration)
-}
-
 // Discovery periodically performs EC2-SD requests. It implements
 // the Discoverer interface.
 type Discovery struct {
+	*refresh.Discovery
 	aws      *aws.Config
 	interval time.Duration
 	profile  string
 	roleARN  string
 	port     int
 	filters  []*Filter
-	logger   log.Logger
 }
 
 // NewDiscovery returns a new EC2Discovery which periodically refreshes its targets.
@@ -146,7 +130,7 @@ func NewDiscovery(conf *SDConfig, logger log.Logger) *Discovery {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
-	return &Discovery{
+	d := &Discovery{
 		aws: &aws.Config{
 			Endpoint:    &conf.Endpoint,
 			Region:      &conf.Region,
@@ -157,62 +141,23 @@ func NewDiscovery(conf *SDConfig, logger log.Logger) *Discovery {
 		filters:  conf.Filters,
 		interval: time.Duration(conf.RefreshInterval),
 		port:     conf.Port,
-		logger:   logger,
 	}
+	d.Discovery = refresh.NewDiscovery(
+		logger,
+		"ec2",
+		time.Duration(conf.RefreshInterval),
+		d.refresh,
+	)
+	return d
 }
 
-// Run implements the Discoverer interface.
-func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
-	ticker := time.NewTicker(d.interval)
-	defer ticker.Stop()
-
-	// Get an initial set right away.
-	tg, err := d.refresh(ctx)
-	if err != nil {
-		level.Error(d.logger).Log("msg", "Refresh failed", "err", err)
-	} else {
-		select {
-		case ch <- []*targetgroup.Group{tg}:
-		case <-ctx.Done():
-			return
-		}
-	}
-
-	for {
-		select {
-		case <-ticker.C:
-			tg, err := d.refresh(ctx)
-			if err != nil {
-				level.Error(d.logger).Log("msg", "Refresh failed", "err", err)
-				continue
-			}
-
-			select {
-			case ch <- []*targetgroup.Group{tg}:
-			case <-ctx.Done():
-				return
-			}
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-func (d *Discovery) refresh(ctx context.Context) (tg *targetgroup.Group, err error) {
-	t0 := time.Now()
-	defer func() {
-		ec2SDRefreshDuration.Observe(time.Since(t0).Seconds())
-		if err != nil {
-			ec2SDRefreshFailuresCount.Inc()
-		}
-	}()
-
+func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 	sess, err := session.NewSessionWithOptions(session.Options{
 		Config:  *d.aws,
 		Profile: d.profile,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("could not create aws session: %s", err)
+		return nil, errors.Wrap(err, "could not create aws session")
 	}
 
 	var ec2s *ec2.EC2
@@ -222,7 +167,7 @@ func (d *Discovery) refresh(ctx context.Context) (tg *targetgroup.Group, err err
 	} else {
 		ec2s = ec2.New(sess)
 	}
-	tg = &targetgroup.Group{
+	tg := &targetgroup.Group{
 		Source: *d.aws.Region,
 	}
 
@@ -270,6 +215,10 @@ func (d *Discovery) refresh(ctx context.Context) (tg *targetgroup.Group, err err
 				labels[ec2LabelInstanceState] = model.LabelValue(*inst.State.Name)
 				labels[ec2LabelInstanceType] = model.LabelValue(*inst.InstanceType)
 
+				if inst.InstanceLifecycle != nil {
+					labels[ec2LabelInstanceLifecycle] = model.LabelValue(*inst.InstanceLifecycle)
+				}
+
 				if inst.VpcId != nil {
 					labels[ec2LabelVPCID] = model.LabelValue(*inst.VpcId)
 					labels[ec2LabelPrimarySubnetID] = model.LabelValue(*inst.SubnetId)
@@ -304,7 +253,7 @@ func (d *Discovery) refresh(ctx context.Context) (tg *targetgroup.Group, err err
 		}
 		return true
 	}); err != nil {
-		return nil, fmt.Errorf("could not describe instances: %s", err)
+		return nil, errors.Wrap(err, "could not describe instances")
 	}
-	return tg, nil
+	return []*targetgroup.Group{tg}, nil
 }

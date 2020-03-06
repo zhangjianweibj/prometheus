@@ -10,6 +10,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 package logging
 
 import (
@@ -22,7 +23,7 @@ type ratelimiter struct {
 	next    log.Logger
 }
 
-// RateLimit write to a loger.
+// RateLimit write to a logger.
 func RateLimit(next log.Logger, limit rate.Limit) log.Logger {
 	return &ratelimiter{
 		limiter: rate.NewLimiter(limit, int(limit)),

@@ -18,9 +18,9 @@ import (
 	"math"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	"github.com/prometheus/prometheus/util/testutil"
 )
 
 func TestMergeStringSlices(t *testing.T) {
@@ -33,7 +33,7 @@ func TestMergeStringSlices(t *testing.T) {
 		{[][]string{{"foo"}, {"bar"}}, []string{"bar", "foo"}},
 		{[][]string{{"foo"}, {"bar"}, {"baz"}}, []string{"bar", "baz", "foo"}},
 	} {
-		require.Equal(t, tc.expected, mergeStringSlices(tc.input))
+		testutil.Equals(t, tc.expected, mergeStringSlices(tc.input))
 	}
 }
 
@@ -48,7 +48,7 @@ func TestMergeTwoStringSlices(t *testing.T) {
 		{[]string{"foo"}, []string{"bar", "baz"}, []string{"bar", "baz", "foo"}},
 		{[]string{"foo"}, []string{"foo"}, []string{"foo"}},
 	} {
-		require.Equal(t, tc.expected, mergeTwoStringSlices(tc.a, tc.b))
+		testutil.Equals(t, tc.expected, mergeTwoStringSlices(tc.a, tc.b))
 	}
 }
 
@@ -111,36 +111,36 @@ func TestMergeSeriesSet(t *testing.T) {
 	} {
 		merged := NewMergeSeriesSet(tc.input, nil)
 		for merged.Next() {
-			require.True(t, tc.expected.Next())
+			testutil.Assert(t, tc.expected.Next(), "Expected Next() to be true")
 			actualSeries := merged.At()
 			expectedSeries := tc.expected.At()
-			require.Equal(t, expectedSeries.Labels(), actualSeries.Labels())
-			require.Equal(t, drainSamples(expectedSeries.Iterator()), drainSamples(actualSeries.Iterator()))
+			testutil.Equals(t, expectedSeries.Labels(), actualSeries.Labels())
+			testutil.Equals(t, drainSamples(expectedSeries.Iterator()), drainSamples(actualSeries.Iterator()))
 		}
-		require.False(t, tc.expected.Next())
+		testutil.Assert(t, !tc.expected.Next(), "Expected Next() to be false")
 	}
 }
 
 func TestMergeIterator(t *testing.T) {
 	for _, tc := range []struct {
-		input    []SeriesIterator
+		input    []chunkenc.Iterator
 		expected []sample
 	}{
 		{
-			input: []SeriesIterator{
+			input: []chunkenc.Iterator{
 				newListSeriesIterator([]sample{{0, 0}, {1, 1}}),
 			},
 			expected: []sample{{0, 0}, {1, 1}},
 		},
 		{
-			input: []SeriesIterator{
+			input: []chunkenc.Iterator{
 				newListSeriesIterator([]sample{{0, 0}, {1, 1}}),
 				newListSeriesIterator([]sample{{2, 2}, {3, 3}}),
 			},
 			expected: []sample{{0, 0}, {1, 1}, {2, 2}, {3, 3}},
 		},
 		{
-			input: []SeriesIterator{
+			input: []chunkenc.Iterator{
 				newListSeriesIterator([]sample{{0, 0}, {3, 3}}),
 				newListSeriesIterator([]sample{{1, 1}, {4, 4}}),
 				newListSeriesIterator([]sample{{2, 2}, {5, 5}}),
@@ -148,7 +148,7 @@ func TestMergeIterator(t *testing.T) {
 			expected: []sample{{0, 0}, {1, 1}, {2, 2}, {3, 3}, {4, 4}, {5, 5}},
 		},
 		{
-			input: []SeriesIterator{
+			input: []chunkenc.Iterator{
 				newListSeriesIterator([]sample{{0, 0}, {1, 1}}),
 				newListSeriesIterator([]sample{{0, 0}, {2, 2}}),
 				newListSeriesIterator([]sample{{2, 2}, {3, 3}}),
@@ -158,25 +158,25 @@ func TestMergeIterator(t *testing.T) {
 	} {
 		merged := newMergeIterator(tc.input)
 		actual := drainSamples(merged)
-		require.Equal(t, tc.expected, actual)
+		testutil.Equals(t, tc.expected, actual)
 	}
 }
 
 func TestMergeIteratorSeek(t *testing.T) {
 	for _, tc := range []struct {
-		input    []SeriesIterator
+		input    []chunkenc.Iterator
 		seek     int64
 		expected []sample
 	}{
 		{
-			input: []SeriesIterator{
+			input: []chunkenc.Iterator{
 				newListSeriesIterator([]sample{{0, 0}, {1, 1}, {2, 2}}),
 			},
 			seek:     1,
 			expected: []sample{{1, 1}, {2, 2}},
 		},
 		{
-			input: []SeriesIterator{
+			input: []chunkenc.Iterator{
 				newListSeriesIterator([]sample{{0, 0}, {1, 1}}),
 				newListSeriesIterator([]sample{{2, 2}, {3, 3}}),
 			},
@@ -184,7 +184,7 @@ func TestMergeIteratorSeek(t *testing.T) {
 			expected: []sample{{2, 2}, {3, 3}},
 		},
 		{
-			input: []SeriesIterator{
+			input: []chunkenc.Iterator{
 				newListSeriesIterator([]sample{{0, 0}, {3, 3}}),
 				newListSeriesIterator([]sample{{1, 1}, {4, 4}}),
 				newListSeriesIterator([]sample{{2, 2}, {5, 5}}),
@@ -200,11 +200,11 @@ func TestMergeIteratorSeek(t *testing.T) {
 			actual = append(actual, sample{t, v})
 		}
 		actual = append(actual, drainSamples(merged)...)
-		require.Equal(t, tc.expected, actual)
+		testutil.Equals(t, tc.expected, actual)
 	}
 }
 
-func drainSamples(iter SeriesIterator) []sample {
+func drainSamples(iter chunkenc.Iterator) []sample {
 	result := []sample{}
 	for iter.Next() {
 		t, v := iter.At()

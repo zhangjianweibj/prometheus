@@ -15,19 +15,27 @@ package rules
 
 import (
 	"context"
+	"fmt"
+	"io/ioutil"
 	"math"
+	"os"
 	"sort"
 	"testing"
 	"time"
 
 	"github.com/go-kit/kit/log"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
+	yaml "gopkg.in/yaml.v2"
 
 	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/pkg/rulefmt"
 	"github.com/prometheus/prometheus/pkg/timestamp"
 	"github.com/prometheus/prometheus/pkg/value"
 	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/util/teststorage"
 	"github.com/prometheus/prometheus/util/testutil"
 )
 
@@ -43,7 +51,7 @@ func TestAlertingRule(t *testing.T) {
 	err = suite.Run()
 	testutil.Ok(t, err)
 
-	expr, err := promql.ParseExpr(`http_requests{group="canary", job="app-server"} < 100`)
+	expr, err := parser.ParseExpr(`http_requests{group="canary", job="app-server"} < 100`)
 	testutil.Ok(t, err)
 
 	rule := NewAlertingRule(
@@ -51,7 +59,7 @@ func TestAlertingRule(t *testing.T) {
 		expr,
 		time.Minute,
 		labels.FromStrings("severity", "{{\"c\"}}ritical"),
-		nil, true, nil,
+		nil, nil, true, nil,
 	)
 	result := promql.Vector{
 		{
@@ -184,7 +192,7 @@ func TestForStateAddSamples(t *testing.T) {
 	err = suite.Run()
 	testutil.Ok(t, err)
 
-	expr, err := promql.ParseExpr(`http_requests{group="canary", job="app-server"} < 100`)
+	expr, err := parser.ParseExpr(`http_requests{group="canary", job="app-server"} < 100`)
 	testutil.Ok(t, err)
 
 	rule := NewAlertingRule(
@@ -192,7 +200,7 @@ func TestForStateAddSamples(t *testing.T) {
 		expr,
 		time.Minute,
 		labels.FromStrings("severity", "{{\"c\"}}ritical"),
-		nil, true, nil,
+		nil, nil, true, nil,
 	)
 	result := promql.Vector{
 		{
@@ -345,7 +353,7 @@ func TestForStateRestore(t *testing.T) {
 	err = suite.Run()
 	testutil.Ok(t, err)
 
-	expr, err := promql.ParseExpr(`http_requests{group="canary", job="app-server"} < 100`)
+	expr, err := parser.ParseExpr(`http_requests{group="canary", job="app-server"} < 100`)
 	testutil.Ok(t, err)
 
 	opts := &ManagerOptions{
@@ -366,10 +374,16 @@ func TestForStateRestore(t *testing.T) {
 		expr,
 		alertForDuration,
 		labels.FromStrings("severity", "critical"),
-		nil, true, nil,
+		nil, nil, true, nil,
 	)
 
-	group := NewGroup("default", "", time.Second, []Rule{rule}, true, opts)
+	group := NewGroup(GroupOptions{
+		Name:          "default",
+		Interval:      time.Second,
+		Rules:         []Rule{rule},
+		ShouldRestore: true,
+		Opts:          opts,
+	})
 	groups := make(map[string]*Group)
 	groups["default;"] = group
 
@@ -426,9 +440,15 @@ func TestForStateRestore(t *testing.T) {
 			expr,
 			alertForDuration,
 			labels.FromStrings("severity", "critical"),
-			nil, false, nil,
+			nil, nil, false, nil,
 		)
-		newGroup := NewGroup("default", "", time.Second, []Rule{newRule}, true, opts)
+		newGroup := NewGroup(GroupOptions{
+			Name:          "default",
+			Interval:      time.Second,
+			Rules:         []Rule{newRule},
+			ShouldRestore: true,
+			Opts:          opts,
+		})
 
 		newGroups := make(map[string]*Group)
 		newGroups["default;"] = newGroup
@@ -492,14 +512,13 @@ func TestForStateRestore(t *testing.T) {
 }
 
 func TestStaleness(t *testing.T) {
-	storage := testutil.NewStorage(t)
+	storage := teststorage.New(t)
 	defer storage.Close()
 	engineOpts := promql.EngineOpts{
-		Logger:        nil,
-		Reg:           nil,
-		MaxConcurrent: 10,
-		MaxSamples:    10,
-		Timeout:       10 * time.Second,
+		Logger:     nil,
+		Reg:        nil,
+		MaxSamples: 10,
+		Timeout:    10 * time.Second,
 	}
 	engine := promql.NewEngine(engineOpts)
 	opts := &ManagerOptions{
@@ -510,13 +529,19 @@ func TestStaleness(t *testing.T) {
 		Logger:     log.NewNopLogger(),
 	}
 
-	expr, err := promql.ParseExpr("a + 1")
+	expr, err := parser.ParseExpr("a + 1")
 	testutil.Ok(t, err)
 	rule := NewRecordingRule("a_plus_one", expr, labels.Labels{})
-	group := NewGroup("default", "", time.Second, []Rule{rule}, true, opts)
+	group := NewGroup(GroupOptions{
+		Name:          "default",
+		Interval:      time.Second,
+		Rules:         []Rule{rule},
+		ShouldRestore: true,
+		Opts:          opts,
+	})
 
 	// A time series that has two samples and then goes stale.
-	app, _ := storage.Appender()
+	app := storage.Appender()
 	app.Add(labels.FromStrings(model.MetricNameLabel, "a"), 0, 1)
 	app.Add(labels.FromStrings(model.MetricNameLabel, "a"), 1000, 2)
 	app.Add(labels.FromStrings(model.MetricNameLabel, "a"), 2000, math.Float64frombits(value.StaleNaN))
@@ -552,7 +577,7 @@ func TestStaleness(t *testing.T) {
 	metricSample[2].V = 42 // reflect.DeepEqual cannot handle NaN.
 
 	want := map[string][]promql.Point{
-		metric: {{0, 2}, {1000, 3}, {2000, 42}},
+		metric: {{T: 0, V: 2}, {T: 1000, V: 3}, {T: 2000, V: 42}},
 	}
 
 	testutil.Equals(t, want, samples)
@@ -581,46 +606,97 @@ func readSeriesSet(ss storage.SeriesSet) (map[string][]promql.Point, error) {
 func TestCopyState(t *testing.T) {
 	oldGroup := &Group{
 		rules: []Rule{
-			NewAlertingRule("alert", nil, 0, nil, nil, true, nil),
+			NewAlertingRule("alert", nil, 0, nil, nil, nil, true, nil),
 			NewRecordingRule("rule1", nil, nil),
 			NewRecordingRule("rule2", nil, nil),
-			NewRecordingRule("rule3", nil, nil),
-			NewRecordingRule("rule3", nil, nil),
+			NewRecordingRule("rule3", nil, labels.Labels{{Name: "l1", Value: "v1"}}),
+			NewRecordingRule("rule3", nil, labels.Labels{{Name: "l1", Value: "v2"}}),
+			NewRecordingRule("rule3", nil, labels.Labels{{Name: "l1", Value: "v3"}}),
+			NewAlertingRule("alert2", nil, 0, labels.Labels{{Name: "l2", Value: "v1"}}, nil, nil, true, nil),
 		},
 		seriesInPreviousEval: []map[string]labels.Labels{
-			{"a": nil},
-			{"r1": nil},
-			{"r2": nil},
-			{"r3a": nil},
-			{"r3b": nil},
+			{},
+			{},
+			{},
+			{"r3a": labels.Labels{{Name: "l1", Value: "v1"}}},
+			{"r3b": labels.Labels{{Name: "l1", Value: "v2"}}},
+			{"r3c": labels.Labels{{Name: "l1", Value: "v3"}}},
+			{"a2": labels.Labels{{Name: "l2", Value: "v1"}}},
 		},
 		evaluationDuration: time.Second,
 	}
 	oldGroup.rules[0].(*AlertingRule).active[42] = nil
 	newGroup := &Group{
 		rules: []Rule{
-			NewRecordingRule("rule3", nil, nil),
-			NewRecordingRule("rule3", nil, nil),
-			NewRecordingRule("rule3", nil, nil),
-			NewAlertingRule("alert", nil, 0, nil, nil, true, nil),
+			NewRecordingRule("rule3", nil, labels.Labels{{Name: "l1", Value: "v0"}}),
+			NewRecordingRule("rule3", nil, labels.Labels{{Name: "l1", Value: "v1"}}),
+			NewRecordingRule("rule3", nil, labels.Labels{{Name: "l1", Value: "v2"}}),
+			NewAlertingRule("alert", nil, 0, nil, nil, nil, true, nil),
 			NewRecordingRule("rule1", nil, nil),
+			NewAlertingRule("alert2", nil, 0, labels.Labels{{Name: "l2", Value: "v0"}}, nil, nil, true, nil),
+			NewAlertingRule("alert2", nil, 0, labels.Labels{{Name: "l2", Value: "v1"}}, nil, nil, true, nil),
 			NewRecordingRule("rule4", nil, nil),
 		},
-		seriesInPreviousEval: make([]map[string]labels.Labels, 6),
+		seriesInPreviousEval: make([]map[string]labels.Labels, 8),
 	}
 	newGroup.CopyState(oldGroup)
 
 	want := []map[string]labels.Labels{
-		{"r3a": nil},
-		{"r3b": nil},
 		nil,
-		{"a": nil},
-		{"r1": nil},
+		{"r3a": labels.Labels{{Name: "l1", Value: "v1"}}},
+		{"r3b": labels.Labels{{Name: "l1", Value: "v2"}}},
+		{},
+		{},
+		nil,
+		{"a2": labels.Labels{{Name: "l2", Value: "v1"}}},
 		nil,
 	}
 	testutil.Equals(t, want, newGroup.seriesInPreviousEval)
 	testutil.Equals(t, oldGroup.rules[0], newGroup.rules[3])
 	testutil.Equals(t, oldGroup.evaluationDuration, newGroup.evaluationDuration)
+	testutil.Equals(t, []labels.Labels{labels.Labels{{Name: "l1", Value: "v3"}}}, newGroup.staleSeries)
+}
+
+func TestDeletedRuleMarkedStale(t *testing.T) {
+	storage := teststorage.New(t)
+	defer storage.Close()
+	oldGroup := &Group{
+		rules: []Rule{
+			NewRecordingRule("rule1", nil, labels.Labels{{Name: "l1", Value: "v1"}}),
+		},
+		seriesInPreviousEval: []map[string]labels.Labels{
+			{"r1": labels.Labels{{Name: "l1", Value: "v1"}}},
+		},
+	}
+	newGroup := &Group{
+		rules:                []Rule{},
+		seriesInPreviousEval: []map[string]labels.Labels{},
+		opts: &ManagerOptions{
+			Appendable: storage,
+		},
+	}
+	newGroup.CopyState(oldGroup)
+
+	newGroup.Eval(context.Background(), time.Unix(0, 0))
+
+	querier, err := storage.Querier(context.Background(), 0, 2000)
+	testutil.Ok(t, err)
+	defer querier.Close()
+
+	matcher, err := labels.NewMatcher(labels.MatchEqual, "l1", "v1")
+	testutil.Ok(t, err)
+
+	set, _, err := querier.Select(nil, matcher)
+	testutil.Ok(t, err)
+
+	samples, err := readSeriesSet(set)
+	testutil.Ok(t, err)
+
+	metric := labels.FromStrings("l1", "v1").String()
+	metricSample, ok := samples[metric]
+
+	testutil.Assert(t, ok, "Series %s not returned.", metric)
+	testutil.Assert(t, value.IsStaleNaN(metricSample[0].V), "Appended sample not as expected. Wanted: stale NaN Got: %x", math.Float64bits(metricSample[0].V))
 }
 
 func TestUpdate(t *testing.T) {
@@ -628,14 +704,13 @@ func TestUpdate(t *testing.T) {
 	expected := map[string]labels.Labels{
 		"test": labels.FromStrings("name", "value"),
 	}
-	storage := testutil.NewStorage(t)
+	storage := teststorage.New(t)
 	defer storage.Close()
 	opts := promql.EngineOpts{
-		Logger:        nil,
-		Reg:           nil,
-		MaxConcurrent: 10,
-		MaxSamples:    10,
-		Timeout:       10 * time.Second,
+		Logger:     nil,
+		Reg:        nil,
+		MaxSamples: 10,
+		Timeout:    10 * time.Second,
 	}
 	engine := promql.NewEngine(opts)
 	ruleManager := NewManager(&ManagerOptions{
@@ -648,33 +723,125 @@ func TestUpdate(t *testing.T) {
 	ruleManager.Run()
 	defer ruleManager.Stop()
 
-	err := ruleManager.Update(10*time.Second, files)
+	err := ruleManager.Update(10*time.Second, files, nil)
 	testutil.Ok(t, err)
 	testutil.Assert(t, len(ruleManager.groups) > 0, "expected non-empty rule groups")
-	for _, g := range ruleManager.groups {
+	ogs := map[string]*Group{}
+	for h, g := range ruleManager.groups {
 		g.seriesInPreviousEval = []map[string]labels.Labels{
 			expected,
 		}
+		ogs[h] = g
 	}
 
-	err = ruleManager.Update(10*time.Second, files)
+	err = ruleManager.Update(10*time.Second, files, nil)
 	testutil.Ok(t, err)
-	for _, g := range ruleManager.groups {
+	for h, g := range ruleManager.groups {
 		for _, actual := range g.seriesInPreviousEval {
 			testutil.Equals(t, expected, actual)
 		}
+		// Groups are the same because of no updates.
+		testutil.Equals(t, ogs[h], g)
+	}
+
+	// Groups will be recreated if updated.
+	rgs, errs := rulefmt.ParseFile("fixtures/rules.yaml")
+	testutil.Assert(t, len(errs) == 0, "file parsing failures")
+
+	tmpFile, err := ioutil.TempFile("", "rules.test.*.yaml")
+	testutil.Ok(t, err)
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	err = ruleManager.Update(10*time.Second, []string{tmpFile.Name()}, nil)
+	testutil.Ok(t, err)
+
+	for h, g := range ruleManager.groups {
+		ogs[h] = g
+	}
+
+	// Update interval and reload.
+	for i, g := range rgs.Groups {
+		if g.Interval != 0 {
+			rgs.Groups[i].Interval = g.Interval * 2
+		} else {
+			rgs.Groups[i].Interval = model.Duration(10)
+		}
+
+	}
+	reloadAndValidate(rgs, t, tmpFile, ruleManager, expected, ogs)
+
+	// Change group rules and reload.
+	for i, g := range rgs.Groups {
+		for j, r := range g.Rules {
+			rgs.Groups[i].Rules[j].Expr.SetString(fmt.Sprintf("%s * 0", r.Expr.Value))
+		}
+	}
+	reloadAndValidate(rgs, t, tmpFile, ruleManager, expected, ogs)
+}
+
+// ruleGroupsTest for running tests over rules.
+type ruleGroupsTest struct {
+	Groups []ruleGroupTest `yaml:"groups"`
+}
+
+// ruleGroupTest forms a testing struct for running tests over rules.
+type ruleGroupTest struct {
+	Name     string         `yaml:"name"`
+	Interval model.Duration `yaml:"interval,omitempty"`
+	Rules    []rulefmt.Rule `yaml:"rules"`
+}
+
+func formatRules(r *rulefmt.RuleGroups) ruleGroupsTest {
+	grps := r.Groups
+	tmp := []ruleGroupTest{}
+	for _, g := range grps {
+		rtmp := []rulefmt.Rule{}
+		for _, r := range g.Rules {
+			rtmp = append(rtmp, rulefmt.Rule{
+				Record:      r.Record.Value,
+				Alert:       r.Alert.Value,
+				Expr:        r.Expr.Value,
+				For:         r.For,
+				Labels:      r.Labels,
+				Annotations: r.Annotations,
+			})
+		}
+		tmp = append(tmp, ruleGroupTest{
+			Name:     g.Name,
+			Interval: g.Interval,
+			Rules:    rtmp,
+		})
+	}
+	return ruleGroupsTest{
+		Groups: tmp,
+	}
+}
+
+func reloadAndValidate(rgs *rulefmt.RuleGroups, t *testing.T, tmpFile *os.File, ruleManager *Manager, expected map[string]labels.Labels, ogs map[string]*Group) {
+	bs, err := yaml.Marshal(formatRules(rgs))
+	testutil.Ok(t, err)
+	tmpFile.Seek(0, 0)
+	_, err = tmpFile.Write(bs)
+	testutil.Ok(t, err)
+	err = ruleManager.Update(10*time.Second, []string{tmpFile.Name()}, nil)
+	testutil.Ok(t, err)
+	for h, g := range ruleManager.groups {
+		if ogs[h] == g {
+			t.Fail()
+		}
+		ogs[h] = g
 	}
 }
 
 func TestNotify(t *testing.T) {
-	storage := testutil.NewStorage(t)
+	storage := teststorage.New(t)
 	defer storage.Close()
 	engineOpts := promql.EngineOpts{
-		Logger:        nil,
-		Reg:           nil,
-		MaxConcurrent: 10,
-		MaxSamples:    10,
-		Timeout:       10 * time.Second,
+		Logger:     nil,
+		Reg:        nil,
+		MaxSamples: 10,
+		Timeout:    10 * time.Second,
 	}
 	engine := promql.NewEngine(engineOpts)
 	var lastNotified []*Alert
@@ -691,12 +858,18 @@ func TestNotify(t *testing.T) {
 		ResendDelay: 2 * time.Second,
 	}
 
-	expr, err := promql.ParseExpr("a > 1")
+	expr, err := parser.ParseExpr("a > 1")
 	testutil.Ok(t, err)
-	rule := NewAlertingRule("aTooHigh", expr, 0, labels.Labels{}, labels.Labels{}, true, log.NewNopLogger())
-	group := NewGroup("alert", "", time.Second, []Rule{rule}, true, opts)
+	rule := NewAlertingRule("aTooHigh", expr, 0, labels.Labels{}, labels.Labels{}, nil, true, log.NewNopLogger())
+	group := NewGroup(GroupOptions{
+		Name:          "alert",
+		Interval:      time.Second,
+		Rules:         []Rule{rule},
+		ShouldRestore: true,
+		Opts:          opts,
+	})
 
-	app, _ := storage.Appender()
+	app := storage.Appender()
 	app.Add(labels.FromStrings(model.MetricNameLabel, "a"), 1000, 2)
 	app.Add(labels.FromStrings(model.MetricNameLabel, "a"), 2000, 3)
 	app.Add(labels.FromStrings(model.MetricNameLabel, "a"), 5000, 3)
@@ -723,4 +896,229 @@ func TestNotify(t *testing.T) {
 	// Resolution alert sent right away
 	group.Eval(ctx, time.Unix(6, 0))
 	testutil.Equals(t, 1, len(lastNotified))
+}
+
+func TestMetricsUpdate(t *testing.T) {
+	files := []string{"fixtures/rules.yaml", "fixtures/rules2.yaml"}
+	metricNames := []string{
+		"prometheus_rule_group_interval_seconds",
+		"prometheus_rule_group_last_duration_seconds",
+		"prometheus_rule_group_last_evaluation_timestamp_seconds",
+		"prometheus_rule_group_rules",
+	}
+
+	storage := teststorage.New(t)
+	registry := prometheus.NewRegistry()
+	defer storage.Close()
+	opts := promql.EngineOpts{
+		Logger:     nil,
+		Reg:        nil,
+		MaxSamples: 10,
+		Timeout:    10 * time.Second,
+	}
+	engine := promql.NewEngine(opts)
+	ruleManager := NewManager(&ManagerOptions{
+		Appendable: storage,
+		TSDB:       storage,
+		QueryFunc:  EngineQueryFunc(engine, storage),
+		Context:    context.Background(),
+		Logger:     log.NewNopLogger(),
+		Registerer: registry,
+	})
+	ruleManager.Run()
+	defer ruleManager.Stop()
+
+	countMetrics := func() int {
+		ms, err := registry.Gather()
+		testutil.Ok(t, err)
+		var metrics int
+		for _, m := range ms {
+			s := m.GetName()
+			for _, n := range metricNames {
+				if s == n {
+					metrics += len(m.Metric)
+					break
+				}
+			}
+		}
+		return metrics
+	}
+
+	cases := []struct {
+		files   []string
+		metrics int
+	}{
+		{
+			files:   files,
+			metrics: 8,
+		},
+		{
+			files:   files[:1],
+			metrics: 4,
+		},
+		{
+			files:   files[:0],
+			metrics: 0,
+		},
+		{
+			files:   files[1:],
+			metrics: 4,
+		},
+	}
+
+	for i, c := range cases {
+		err := ruleManager.Update(time.Second, c.files, nil)
+		testutil.Ok(t, err)
+		time.Sleep(2 * time.Second)
+		testutil.Equals(t, c.metrics, countMetrics(), "test %d: invalid count of metrics", i)
+	}
+}
+
+func TestGroupStalenessOnRemoval(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	files := []string{"fixtures/rules2.yaml"}
+	sameFiles := []string{"fixtures/rules2_copy.yaml"}
+
+	storage := teststorage.New(t)
+	defer storage.Close()
+	opts := promql.EngineOpts{
+		Logger:     nil,
+		Reg:        nil,
+		MaxSamples: 10,
+		Timeout:    10 * time.Second,
+	}
+	engine := promql.NewEngine(opts)
+	ruleManager := NewManager(&ManagerOptions{
+		Appendable: storage,
+		TSDB:       storage,
+		QueryFunc:  EngineQueryFunc(engine, storage),
+		Context:    context.Background(),
+		Logger:     log.NewNopLogger(),
+	})
+	var stopped bool
+	ruleManager.Run()
+	defer func() {
+		if !stopped {
+			ruleManager.Stop()
+		}
+	}()
+
+	cases := []struct {
+		files    []string
+		staleNaN int
+	}{
+		{
+			files:    files,
+			staleNaN: 0,
+		},
+		{
+			// When we remove the files, it should produce a staleness marker.
+			files:    files[:0],
+			staleNaN: 1,
+		},
+		{
+			// Rules that produce the same metrics but in a different file
+			// should not produce staleness marker.
+			files:    sameFiles,
+			staleNaN: 0,
+		},
+		{
+			// Staleness marker should be present as we don't have any rules
+			// loaded anymore.
+			files:    files[:0],
+			staleNaN: 1,
+		},
+		{
+			// Add rules back so we have rules loaded when we stop the manager
+			// and check for the absence of staleness markers.
+			files:    sameFiles,
+			staleNaN: 0,
+		},
+	}
+
+	var totalStaleNaN int
+	for i, c := range cases {
+		err := ruleManager.Update(time.Second, c.files, nil)
+		testutil.Ok(t, err)
+		time.Sleep(3 * time.Second)
+		totalStaleNaN += c.staleNaN
+		testutil.Equals(t, totalStaleNaN, countStaleNaN(t, storage), "test %d/%q: invalid count of staleness markers", i, c.files)
+	}
+	ruleManager.Stop()
+	stopped = true
+	testutil.Equals(t, totalStaleNaN, countStaleNaN(t, storage), "invalid count of staleness markers after stopping the engine")
+}
+
+func TestMetricsStalenessOnManagerShutdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	files := []string{"fixtures/rules2.yaml"}
+
+	storage := teststorage.New(t)
+	defer storage.Close()
+	opts := promql.EngineOpts{
+		Logger:     nil,
+		Reg:        nil,
+		MaxSamples: 10,
+		Timeout:    10 * time.Second,
+	}
+	engine := promql.NewEngine(opts)
+	ruleManager := NewManager(&ManagerOptions{
+		Appendable: storage,
+		TSDB:       storage,
+		QueryFunc:  EngineQueryFunc(engine, storage),
+		Context:    context.Background(),
+		Logger:     log.NewNopLogger(),
+	})
+	var stopped bool
+	ruleManager.Run()
+	defer func() {
+		if !stopped {
+			ruleManager.Stop()
+		}
+	}()
+
+	err := ruleManager.Update(2*time.Second, files, nil)
+	time.Sleep(4 * time.Second)
+	testutil.Ok(t, err)
+	start := time.Now()
+	err = ruleManager.Update(3*time.Second, files[:0], nil)
+	testutil.Ok(t, err)
+	ruleManager.Stop()
+	stopped = true
+	testutil.Assert(t, time.Since(start) < 1*time.Second, "rule manager does not stop early")
+	time.Sleep(5 * time.Second)
+	testutil.Equals(t, 0, countStaleNaN(t, storage), "invalid count of staleness markers after stopping the engine")
+}
+
+func countStaleNaN(t *testing.T, storage storage.Storage) int {
+	var c int
+	querier, err := storage.Querier(context.Background(), 0, time.Now().Unix()*1000)
+	testutil.Ok(t, err)
+	defer querier.Close()
+
+	matcher, err := labels.NewMatcher(labels.MatchEqual, model.MetricNameLabel, "test_2")
+	testutil.Ok(t, err)
+
+	set, _, err := querier.Select(nil, matcher)
+	testutil.Ok(t, err)
+
+	samples, err := readSeriesSet(set)
+	testutil.Ok(t, err)
+
+	metric := labels.FromStrings(model.MetricNameLabel, "test_2").String()
+	metricSample, ok := samples[metric]
+
+	testutil.Assert(t, ok, "Series %s not returned.", metric)
+	for _, s := range metricSample {
+		if value.IsStaleNaN(s.V) {
+			c++
+		}
+	}
+	return c
 }

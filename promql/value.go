@@ -19,32 +19,19 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pkg/errors"
+
+	"github.com/prometheus/prometheus/tsdb/chunkenc"
+
 	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/storage"
 )
 
-// Value is a generic interface for values resulting from a query evaluation.
-type Value interface {
-	Type() ValueType
-	String() string
-}
-
-func (Matrix) Type() ValueType { return ValueTypeMatrix }
-func (Vector) Type() ValueType { return ValueTypeVector }
-func (Scalar) Type() ValueType { return ValueTypeScalar }
-func (String) Type() ValueType { return ValueTypeString }
-
-// ValueType describes a type of a value.
-type ValueType string
-
-// The valid value types.
-const (
-	ValueTypeNone   = "none"
-	ValueTypeVector = "vector"
-	ValueTypeScalar = "scalar"
-	ValueTypeMatrix = "matrix"
-	ValueTypeString = "string"
-)
+func (Matrix) Type() parser.ValueType { return parser.ValueTypeMatrix }
+func (Vector) Type() parser.ValueType { return parser.ValueTypeVector }
+func (Scalar) Type() parser.ValueType { return parser.ValueTypeScalar }
+func (String) Type() parser.ValueType { return parser.ValueTypeString }
 
 // String represents a string value.
 type String struct {
@@ -156,7 +143,7 @@ func (vec Vector) ContainsSameLabelset() bool {
 	return false
 }
 
-// Matrix is a slice of Seriess that implements sort.Interface and
+// Matrix is a slice of Series that implements sort.Interface and
 // has a String method.
 type Matrix []Series
 
@@ -203,7 +190,7 @@ func (m Matrix) ContainsSameLabelset() bool {
 // if any occurred.
 type Result struct {
 	Err      error
-	Value    Value
+	Value    parser.Value
 	Warnings storage.Warnings
 }
 
@@ -215,7 +202,7 @@ func (r *Result) Vector() (Vector, error) {
 	}
 	v, ok := r.Value.(Vector)
 	if !ok {
-		return nil, fmt.Errorf("query result is not a Vector")
+		return nil, errors.New("query result is not a Vector")
 	}
 	return v, nil
 }
@@ -228,7 +215,7 @@ func (r *Result) Matrix() (Matrix, error) {
 	}
 	v, ok := r.Value.(Matrix)
 	if !ok {
-		return nil, fmt.Errorf("query result is not a range Vector")
+		return nil, errors.New("query result is not a range Vector")
 	}
 	return v, nil
 }
@@ -241,7 +228,7 @@ func (r *Result) Scalar() (Scalar, error) {
 	}
 	v, ok := r.Value.(Scalar)
 	if !ok {
-		return Scalar{}, fmt.Errorf("query result is not a Scalar")
+		return Scalar{}, errors.New("query result is not a Scalar")
 	}
 	return v, nil
 }
@@ -261,7 +248,7 @@ type StorageSeries struct {
 	series Series
 }
 
-// NewStorageSeries returns a StorageSeries fromfor series.
+// NewStorageSeries returns a StorageSeries from a Series.
 func NewStorageSeries(series Series) *StorageSeries {
 	return &StorageSeries{
 		series: series,
@@ -273,7 +260,7 @@ func (ss *StorageSeries) Labels() labels.Labels {
 }
 
 // Iterator returns a new iterator of the data of the series.
-func (ss *StorageSeries) Iterator() storage.SeriesIterator {
+func (ss *StorageSeries) Iterator() chunkenc.Iterator {
 	return newStorageSeriesIterator(ss.series)
 }
 

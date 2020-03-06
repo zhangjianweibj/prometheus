@@ -66,6 +66,10 @@ global:
   external_labels:
     [ <labelname>: <labelvalue> ... ]
 
+  # File to which PromQL queries are logged.
+  # Reloading the configuration will reopen the file.
+  [ query_log_file: <string> ]
+
 # Rule files specifies a list of globs. Rules and alerts are read from
 # all matching files.
 rule_files:
@@ -127,13 +131,26 @@ job_name: <job_name>
 # If honor_labels is set to "false", label conflicts are resolved by renaming
 # conflicting labels in the scraped data to "exported_<original-label>" (for
 # example "exported_instance", "exported_job") and then attaching server-side
-# labels. This is useful for use cases such as federation, where all labels
-# specified in the target should be preserved.
+# labels.
+#
+# Setting honor_labels to "true" is useful for use cases such as federation and
+# scraping the Pushgateway, where all labels specified in the target should be
+# preserved.
 #
 # Note that any globally configured "external_labels" are unaffected by this
 # setting. In communication with external systems, they are always applied only
 # when a time series does not have a given label yet and are ignored otherwise.
 [ honor_labels: <boolean> | default = false ]
+
+# honor_timestamps controls whether Prometheus respects the timestamps present
+# in scraped data.
+#
+# If honor_timestamps is set to "true", the timestamps of the metrics exposed
+# by the target will be used.
+#
+# If honor_timestamps is set to "false", the timestamps of the metrics exposed
+# by the target will be ignored.
+[ honor_timestamps: <boolean> | default = true ]
 
 # Configures the protocol scheme used for requests.
 [ scheme: <scheme> | default = http ]
@@ -264,6 +281,7 @@ The following meta labels are available on targets during relabeling:
 * `__meta_azure_machine_name`: the machine name
 * `__meta_azure_machine_os_type`: the machine operating system
 * `__meta_azure_machine_private_ip`: the machine's private IP
+* `__meta_azure_machine_public_ip`: the machine's public IP if it exists
 * `__meta_azure_machine_resource_group`: the machine's resource group
 * `__meta_azure_machine_tag_<tagname>`: each tag value of the machine
 * `__meta_azure_machine_scale_set`: the name of the scale set which the vm is part of (this value is only set if you are using a [scale set](https://docs.microsoft.com/en-us/azure/virtual-machine-scale-sets/))
@@ -348,7 +366,7 @@ tags:
 # The string by which Consul tags are joined into the tag label.
 [ tag_separator: <string> | default = , ]
 
-# Allow stale Consul results (see https://www.consul.io/api/index.html#consistency-modes). Will reduce load on Consul.
+# Allow stale Consul results (see https://www.consul.io/api/features/consistency.html). Will reduce load on Consul.
 [ allow_stale: <bool> ]
 
 # The time after which the provided names are refreshed.
@@ -410,6 +428,7 @@ The following meta labels are available on targets during [relabeling](#relabel_
 
 * `__meta_ec2_availability_zone`: the availability zone in which the instance is running
 * `__meta_ec2_instance_id`: the EC2 instance ID
+* `__meta_ec2_instance_lifecycle`: the lifecycle of the EC2 instance, set only for 'spot' or 'scheduled' instances, absent otherwise
 * `__meta_ec2_instance_state`: the state of the EC2 instance
 * `__meta_ec2_instance_type`: the type of the EC2 instance
 * `__meta_ec2_owner_id`: the ID of the AWS account that owns the EC2 instance
@@ -428,8 +447,8 @@ See below for the configuration options for EC2 discovery:
 ```yaml
 # The information to access the EC2 API.
 
-# The AWS Region.
-region: <string>
+# The AWS region. If blank, the region from the instance metadata is used.
+[ region: <string> ]
 
 # Custom endpoint to be used.
 [ endpoint: <string> ]
@@ -493,14 +512,16 @@ interface.
 
 The following meta labels are available on targets during [relabeling](#relabel_config):
 
+* `__meta_openstack_address_pool`: the pool of the private IP.
+* `__meta_openstack_instance_flavor`: the flavor of the OpenStack instance.
 * `__meta_openstack_instance_id`: the OpenStack instance ID.
 * `__meta_openstack_instance_name`: the OpenStack instance name.
 * `__meta_openstack_instance_status`: the status of the OpenStack instance.
-* `__meta_openstack_instance_flavor`: the flavor of the OpenStack instance.
-* `__meta_openstack_public_ip`: the public IP of the OpenStack instance.
 * `__meta_openstack_private_ip`: the private IP of the OpenStack instance.
-* `__meta_openstack_address_pool`: the pool of the private IP.
+* `__meta_openstack_project_id`: the project (tenant) owning this instance.
+* `__meta_openstack_public_ip`: the public IP of the OpenStack instance.
 * `__meta_openstack_tag_<tagkey>`: each tag value of the instance.
+* `__meta_openstack_user_id`: the user account owning the tenant.
 
 See below for the configuration options for OpenStack discovery:
 
@@ -696,7 +717,9 @@ Available meta labels:
 
 * `__meta_kubernetes_node_name`: The name of the node object.
 * `__meta_kubernetes_node_label_<labelname>`: Each label from the node object.
+* `__meta_kubernetes_node_labelpresent_<labelname>`: `true` for each label from the node object.
 * `__meta_kubernetes_node_annotation_<annotationname>`: Each annotation from the node object.
+* `__meta_kubernetes_node_annotationpresent_<annotationname>`: `true` for each annotation from the node object.
 * `__meta_kubernetes_node_address_<address_type>`: The first address for each node address type, if it exists.
 
 In addition, the `instance` label for the node will be set to the node name
@@ -712,14 +735,16 @@ service port.
 Available meta labels:
 
 * `__meta_kubernetes_namespace`: The namespace of the service object.
-* `__meta_kubernetes_service_annotation_<annotationname>`: The annotation of the service object.
+* `__meta_kubernetes_service_annotation_<annotationname>`: Each annotation from the service object.
+* `__meta_kubernetes_service_annotationpresent_<annotationname>`: "true" for each annotation of the service object.
 * `__meta_kubernetes_service_cluster_ip`: The cluster IP address of the service. (Does not apply to services of type ExternalName)
 * `__meta_kubernetes_service_external_name`: The DNS name of the service. (Applies to services of type ExternalName)
-* `__meta_kubernetes_service_label_<labelname>`: The label of the service object.
+* `__meta_kubernetes_service_label_<labelname>`: Each label from the service object.
+* `__meta_kubernetes_service_labelpresent_<labelname>`: `true` for each label of the service object.
 * `__meta_kubernetes_service_name`: The name of the service object.
 * `__meta_kubernetes_service_port_name`: Name of the service port for the target.
-* `__meta_kubernetes_service_port_number`: Number of the service port for the target.
 * `__meta_kubernetes_service_port_protocol`: Protocol of the service port for the target.
+* `__meta_kubernetes_service_type`: The type of the service.
 
 #### `pod`
 
@@ -732,8 +757,11 @@ Available meta labels:
 * `__meta_kubernetes_namespace`: The namespace of the pod object.
 * `__meta_kubernetes_pod_name`: The name of the pod object.
 * `__meta_kubernetes_pod_ip`: The pod IP of the pod object.
-* `__meta_kubernetes_pod_label_<labelname>`: The label of the pod object.
-* `__meta_kubernetes_pod_annotation_<annotationname>`: The annotation of the pod object.
+* `__meta_kubernetes_pod_label_<labelname>`: Each label from the pod object.
+* `__meta_kubernetes_pod_labelpresent_<labelname>`: `true`for each label from the pod object.
+* `__meta_kubernetes_pod_annotation_<annotationname>`: Each annotation from the pod object.
+* `__meta_kubernetes_pod_annotationpresent_<annotationname>`: `true` for each annotation from the pod object.
+* `__meta_kubernetes_pod_container_init`: `true` if the container is an [InitContainer](https://kubernetes.io/docs/concepts/workloads/pods/init-containers/)
 * `__meta_kubernetes_pod_container_name`: Name of the container the target address points to.
 * `__meta_kubernetes_pod_container_port_name`: Name of the container port.
 * `__meta_kubernetes_pod_container_port_number`: Number of the container port.
@@ -759,6 +787,8 @@ Available meta labels:
 * `__meta_kubernetes_endpoints_name`: The names of the endpoints object.
 * For all targets discovered directly from the endpoints list (those not additionally inferred
   from underlying pods), the following labels are attached:
+  * `__meta_kubernetes_endpoint_hostname`: Hostname of the endpoint.
+  * `__meta_kubernetes_endpoint_node_name`: Name of the node hosting the endpoint.
   * `__meta_kubernetes_endpoint_ready`: Set to `true` or `false` for the endpoint's ready state.
   * `__meta_kubernetes_endpoint_port_name`: Name of the endpoint port.
   * `__meta_kubernetes_endpoint_port_protocol`: Protocol of the endpoint port.
@@ -777,8 +807,10 @@ Available meta labels:
 
 * `__meta_kubernetes_namespace`: The namespace of the ingress object.
 * `__meta_kubernetes_ingress_name`: The name of the ingress object.
-* `__meta_kubernetes_ingress_label_<labelname>`: The label of the ingress object.
-* `__meta_kubernetes_ingress_annotation_<annotationname>`: The annotation of the ingress object.
+* `__meta_kubernetes_ingress_label_<labelname>`: Each label from the ingress object.
+* `__meta_kubernetes_ingress_labelpresent_<labelname>`: `true` for each label from the ingress object.
+* `__meta_kubernetes_ingress_annotation_<annotationname>`: Each annotation from the ingress object.
+* `__meta_kubernetes_ingress_annotationpresent_<annotationname>`: `true` for each annotation from the ingress object.
 * `__meta_kubernetes_ingress_scheme`: Protocol scheme of ingress, `https` if TLS
   config is set. Defaults to `http`.
 * `__meta_kubernetes_ingress_path`: Path from ingress spec. Defaults to `/`.
@@ -824,6 +856,23 @@ tls_config:
 namespaces:
   names:
     [ - <string> ]
+
+# Optional label and field selectors to limit the discovery process to a subset of available resources. 
+# See https://kubernetes.io/docs/concepts/overview/working-with-objects/field-selectors/
+# and https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/ to learn more about the possible 
+# filters that can be used. Endpoints role supports pod, service and endpoints selectors, other roles
+# only support selectors matching the role itself (e.g. node role can only contain node selectors).
+
+# Note: When making decision about using field/label selector make sure that this 
+# is the best approach - it will prevent Prometheus from reusing single list/watch
+# for all scrape configs. This might result in a bigger load on the Kubernetes API,
+# because per each selector combination there will be additional LIST/WATCH. On the other hand,
+# if you just want to monitor small subset of pods in large cluster it's recommended to use selectors.
+# Decision, if selectors should be used or not depends on the particular situation.
+[ selectors:
+  [ - role: <role>  
+    [ label: <string> ]
+    [ field: <string> ] ]]
 ```
 
 Where `<role>` must be `endpoints`, `service`, `pod`, `node`, or
@@ -1101,8 +1150,8 @@ anchored on both ends. To un-anchor the regex, use `.*<regex>.*`.
 * `labelkeep`: Match `regex` against all label names. Any label that does not match will be
   removed from the set of labels.
 
-Care must be taken with `labeldrop` and `labelkeep` to ensure that metrics are still uniquely labeled
-once the labels are removed.
+Care must be taken with `labeldrop` and `labelkeep` to ensure that metrics are
+still uniquely labeled once the labels are removed.
 
 ### `<metric_relabel_configs>`
 
@@ -1123,8 +1172,9 @@ external labels send identical alerts.
 
 ### `<alertmanager_config>`
 
-An `alertmanager_config` section specifies Alertmanager instances the Prometheus server sends
-alerts to. It also provides parameters to configure how to communicate with these Alertmanagers.
+An `alertmanager_config` section specifies Alertmanager instances the Prometheus
+server sends alerts to. It also provides parameters to configure how to
+communicate with these Alertmanagers.
 
 Alertmanagers may be statically configured via the `static_configs` parameter or
 dynamically discovered using one of the supported service-discovery mechanisms.
@@ -1136,6 +1186,9 @@ through the `__alerts_path__` label.
 ```yaml
 # Per-target Alertmanager timeout when pushing alerts.
 [ timeout: <duration> | default = 10s ]
+
+# The api version of Alertmanager.
+[ api_version: <version> | default = v1 ]
 
 # Prefix for the HTTP path alerts are pushed to.
 [ path_prefix: <path> | default = / ]
@@ -1264,8 +1317,11 @@ tls_config:
 
 # Configures the queue used to write to remote storage.
 queue_config:
-  # Number of samples to buffer per shard before we start dropping them.
-  [ capacity: <int> | default = 10000 ]
+  # Number of samples to buffer per shard before we block reading of more
+  # samples from the WAL. It is recommended to have enough capacity in each
+  # shard to buffer several requests to keep throughput up while processing
+  # occasional slow remote requests.
+  [ capacity: <int> | default = 500 ]
   # Maximum number of shards, i.e. amount of concurrency.
   [ max_shards: <int> | default = 1000 ]
   # Minimum number of shards, i.e. amount of concurrency.
@@ -1274,8 +1330,6 @@ queue_config:
   [ max_samples_per_send: <int> | default = 100]
   # Maximum time a sample will wait in buffer.
   [ batch_send_deadline: <duration> | default = 5s ]
-  # Maximum number of times to retry a batch on recoverable errors.
-  [ max_retries: <int> | default = 3 ]
   # Initial retry delay. Gets doubled for every retry.
   [ min_backoff: <duration> | default = 30ms ]
   # Maximum retry delay.

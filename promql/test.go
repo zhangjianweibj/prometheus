@@ -15,7 +15,6 @@ package promql
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"math"
@@ -24,10 +23,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/util/teststorage"
 	"github.com/prometheus/prometheus/util/testutil"
 )
 
@@ -100,9 +102,9 @@ func (t *Test) Storage() storage.Storage {
 }
 
 func raise(line int, format string, v ...interface{}) error {
-	return &ParseErr{
-		Line: line + 1,
-		Err:  fmt.Errorf(format, v...),
+	return &parser.ParseErr{
+		LineOffset: line,
+		Err:        errors.Errorf(format, v...),
 	}
 }
 
@@ -124,10 +126,10 @@ func parseLoad(lines []string, i int) (int, *loadCmd, error) {
 			i--
 			break
 		}
-		metric, vals, err := parseSeriesDesc(defLine)
+		metric, vals, err := parser.ParseSeriesDesc(defLine)
 		if err != nil {
-			if perr, ok := err.(*ParseErr); ok {
-				perr.Line = i + 1
+			if perr, ok := err.(*parser.ParseErr); ok {
+				perr.LineOffset = i
 			}
 			return i, nil, err
 		}
@@ -146,11 +148,14 @@ func (t *Test) parseEval(lines []string, i int) (int, *evalCmd, error) {
 		at   = parts[2]
 		expr = parts[3]
 	)
-	_, err := ParseExpr(expr)
+	_, err := parser.ParseExpr(expr)
 	if err != nil {
-		if perr, ok := err.(*ParseErr); ok {
-			perr.Line = i + 1
-			perr.Pos += strings.Index(lines[i], expr)
+		if perr, ok := err.(*parser.ParseErr); ok {
+			perr.LineOffset = i
+			posOffset := parser.Pos(strings.Index(lines[i], expr))
+			perr.PositionRange.Start += posOffset
+			perr.PositionRange.End += posOffset
+			perr.Query = lines[i]
 		}
 		return i, nil, err
 	}
@@ -177,13 +182,13 @@ func (t *Test) parseEval(lines []string, i int) (int, *evalCmd, error) {
 			break
 		}
 		if f, err := parseNumber(defLine); err == nil {
-			cmd.expect(0, nil, sequenceValue{value: f})
+			cmd.expect(0, nil, parser.SequenceValue{Value: f})
 			break
 		}
-		metric, vals, err := parseSeriesDesc(defLine)
+		metric, vals, err := parser.ParseSeriesDesc(defLine)
 		if err != nil {
-			if perr, ok := err.(*ParseErr); ok {
-				perr.Line = i + 1
+			if perr, ok := err.(*parser.ParseErr); ok {
+				perr.LineOffset = i
 			}
 			return i, nil, err
 		}
@@ -271,16 +276,16 @@ func (cmd loadCmd) String() string {
 }
 
 // set a sequence of sample values for the given metric.
-func (cmd *loadCmd) set(m labels.Labels, vals ...sequenceValue) {
+func (cmd *loadCmd) set(m labels.Labels, vals ...parser.SequenceValue) {
 	h := m.Hash()
 
 	samples := make([]Point, 0, len(vals))
 	ts := testStartTime
 	for _, v := range vals {
-		if !v.omitted {
+		if !v.Omitted {
 			samples = append(samples, Point{
 				T: ts.UnixNano() / int64(time.Millisecond/time.Nanosecond),
-				V: v.value,
+				V: v.Value,
 			})
 		}
 		ts = ts.Add(cmd.gap)
@@ -318,7 +323,7 @@ type evalCmd struct {
 
 type entry struct {
 	pos  int
-	vals []sequenceValue
+	vals []parser.SequenceValue
 }
 
 func (e entry) String() string {
@@ -342,7 +347,7 @@ func (ev *evalCmd) String() string {
 
 // expect adds a new metric with a sequence of values to the set of expected
 // results for the query.
-func (ev *evalCmd) expect(pos int, m labels.Labels, vals ...sequenceValue) {
+func (ev *evalCmd) expect(pos int, m labels.Labels, vals ...parser.SequenceValue) {
 	if m == nil {
 		ev.expected[0] = entry{pos: pos, vals: vals}
 		return
@@ -353,24 +358,24 @@ func (ev *evalCmd) expect(pos int, m labels.Labels, vals ...sequenceValue) {
 }
 
 // compareResult compares the result value with the defined expectation.
-func (ev *evalCmd) compareResult(result Value) error {
+func (ev *evalCmd) compareResult(result parser.Value) error {
 	switch val := result.(type) {
 	case Matrix:
-		return fmt.Errorf("received range result on instant evaluation")
+		return errors.New("received range result on instant evaluation")
 
 	case Vector:
 		seen := map[uint64]bool{}
 		for pos, v := range val {
 			fp := v.Metric.Hash()
 			if _, ok := ev.metrics[fp]; !ok {
-				return fmt.Errorf("unexpected metric %s in result", v.Metric)
+				return errors.Errorf("unexpected metric %s in result", v.Metric)
 			}
 			exp := ev.expected[fp]
 			if ev.ordered && exp.pos != pos+1 {
-				return fmt.Errorf("expected metric %s with %v at position %d but was at %d", v.Metric, exp.vals, exp.pos, pos+1)
+				return errors.Errorf("expected metric %s with %v at position %d but was at %d", v.Metric, exp.vals, exp.pos, pos+1)
 			}
-			if !almostEqual(exp.vals[0].value, v.V) {
-				return fmt.Errorf("expected %v for %s but got %v", exp.vals[0].value, v.Metric, v.V)
+			if !almostEqual(exp.vals[0].Value, v.V) {
+				return errors.Errorf("expected %v for %s but got %v", exp.vals[0].Value, v.Metric, v.V)
 			}
 
 			seen[fp] = true
@@ -381,17 +386,17 @@ func (ev *evalCmd) compareResult(result Value) error {
 				for _, ss := range val {
 					fmt.Println("    ", ss.Metric, ss.Point)
 				}
-				return fmt.Errorf("expected metric %s with %v not found", ev.metrics[fp], expVals)
+				return errors.Errorf("expected metric %s with %v not found", ev.metrics[fp], expVals)
 			}
 		}
 
 	case Scalar:
-		if !almostEqual(ev.expected[0].vals[0].value, val.V) {
-			return fmt.Errorf("expected Scalar %v but got %v", val.V, ev.expected[0].vals[0].value)
+		if !almostEqual(ev.expected[0].vals[0].Value, val.V) {
+			return errors.Errorf("expected Scalar %v but got %v", val.V, ev.expected[0].vals[0].Value)
 		}
 
 	default:
-		panic(fmt.Errorf("promql.Test.compareResult: unexpected result type %T", result))
+		panic(errors.Errorf("promql.Test.compareResult: unexpected result type %T", result))
 	}
 	return nil
 }
@@ -407,10 +412,9 @@ func (cmd clearCmd) String() string {
 // is reached, evaluation errors do not terminate execution.
 func (t *Test) Run() error {
 	for _, cmd := range t.cmds {
-		err := t.exec(cmd)
 		// TODO(fabxc): aggregate command errors, yield diffs for result
 		// comparison errors.
-		if err != nil {
+		if err := t.exec(cmd); err != nil {
 			return err
 		}
 	}
@@ -424,10 +428,7 @@ func (t *Test) exec(tc testCommand) error {
 		t.clear()
 
 	case *loadCmd:
-		app, err := t.storage.Appender()
-		if err != nil {
-			return err
-		}
+		app := t.storage.Appender()
 		if err := cmd.append(app); err != nil {
 			app.Rollback()
 			return err
@@ -438,36 +439,36 @@ func (t *Test) exec(tc testCommand) error {
 		}
 
 	case *evalCmd:
-		q, err := t.queryEngine.NewInstantQuery(t.storage, cmd.expr, cmd.start)
+		q, err := t.QueryEngine().NewInstantQuery(t.storage, cmd.expr, cmd.start)
 		if err != nil {
 			return err
 		}
+		defer q.Close()
 		res := q.Exec(t.context)
 		if res.Err != nil {
 			if cmd.fail {
 				return nil
 			}
-			return fmt.Errorf("error evaluating query %q (line %d): %s", cmd.expr, cmd.line, res.Err)
+			return errors.Wrapf(res.Err, "error evaluating query %q (line %d)", cmd.expr, cmd.line)
 		}
-		defer q.Close()
 		if res.Err == nil && cmd.fail {
-			return fmt.Errorf("expected error evaluating query %q (line %d) but got none", cmd.expr, cmd.line)
+			return errors.Errorf("expected error evaluating query %q (line %d) but got none", cmd.expr, cmd.line)
 		}
 
 		err = cmd.compareResult(res.Value)
 		if err != nil {
-			return fmt.Errorf("error in %s %s: %s", cmd, cmd.expr, err)
+			return errors.Wrapf(err, "error in %s %s", cmd, cmd.expr)
 		}
 
 		// Check query returns same result in range mode,
-		/// by checking against the middle step.
+		// by checking against the middle step.
 		q, err = t.queryEngine.NewRangeQuery(t.storage, cmd.expr, cmd.start.Add(-time.Minute), cmd.start.Add(time.Minute), time.Minute)
 		if err != nil {
 			return err
 		}
 		rangeRes := q.Exec(t.context)
 		if rangeRes.Err != nil {
-			return fmt.Errorf("error evaluating query %q (line %d) in range mode: %s", cmd.expr, cmd.line, rangeRes.Err)
+			return errors.Wrapf(rangeRes.Err, "error evaluating query %q (line %d) in range mode", cmd.expr, cmd.line)
 		}
 		defer q.Close()
 		if cmd.ordered {
@@ -490,7 +491,7 @@ func (t *Test) exec(tc testCommand) error {
 			err = cmd.compareResult(vec)
 		}
 		if err != nil {
-			return fmt.Errorf("error in %s %s (line %d) rande mode: %s", cmd, cmd.expr, cmd.line, err)
+			return errors.Wrapf(err, "error in %s %s (line %d) rande mode", cmd, cmd.expr, cmd.line)
 		}
 
 	default:
@@ -509,14 +510,13 @@ func (t *Test) clear() {
 	if t.cancelCtx != nil {
 		t.cancelCtx()
 	}
-	t.storage = testutil.NewStorage(t)
+	t.storage = teststorage.New(t)
 
 	opts := EngineOpts{
-		Logger:        nil,
-		Reg:           nil,
-		MaxConcurrent: 20,
-		MaxSamples:    10000,
-		Timeout:       100 * time.Second,
+		Logger:     nil,
+		Reg:        nil,
+		MaxSamples: 10000,
+		Timeout:    100 * time.Second,
 	}
 
 	t.queryEngine = NewEngine(opts)
@@ -561,7 +561,7 @@ func parseNumber(s string) (float64, error) {
 		f, err = strconv.ParseFloat(s, 64)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("error parsing number: %s", err)
+		return 0, errors.Wrap(err, "error parsing number")
 	}
 	return f, nil
 }
@@ -623,14 +623,13 @@ func (ll *LazyLoader) clear() {
 	if ll.cancelCtx != nil {
 		ll.cancelCtx()
 	}
-	ll.storage = testutil.NewStorage(ll)
+	ll.storage = teststorage.New(ll)
 
 	opts := EngineOpts{
-		Logger:        nil,
-		Reg:           nil,
-		MaxConcurrent: 20,
-		MaxSamples:    10000,
-		Timeout:       100 * time.Second,
+		Logger:     nil,
+		Reg:        nil,
+		MaxSamples: 10000,
+		Timeout:    100 * time.Second,
 	}
 
 	ll.queryEngine = NewEngine(opts)
@@ -639,10 +638,7 @@ func (ll *LazyLoader) clear() {
 
 // appendTill appends the defined time series to the storage till the given timestamp (in milliseconds).
 func (ll *LazyLoader) appendTill(ts int64) error {
-	app, err := ll.storage.Appender()
-	if err != nil {
-		return err
-	}
+	app := ll.storage.Appender()
 	for h, smpls := range ll.loadCmd.defs {
 		m := ll.loadCmd.metrics[h]
 		for i, s := range smpls {

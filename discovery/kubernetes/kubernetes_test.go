@@ -54,6 +54,7 @@ type k8sDiscoveryTest struct {
 }
 
 func (d k8sDiscoveryTest) Run(t *testing.T) {
+	t.Helper()
 	ch := make(chan []*targetgroup.Group)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -64,6 +65,21 @@ func (d k8sDiscoveryTest) Run(t *testing.T) {
 
 	// Run discoverer and start a goroutine to read results.
 	go d.discovery.Run(ctx, ch)
+
+	// Ensure that discovery has a discoverer set. This prevents a race
+	// condition where the above go routine may or may not have set a
+	// discoverer yet.
+	for {
+		dis := d.discovery.(*Discovery)
+		dis.RLock()
+		l := len(dis.discoverers)
+		dis.RUnlock()
+		if l > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	resChan := make(chan map[string]*targetgroup.Group)
 	go readResultWithTimeout(t, ch, d.expectedMaxItems, time.Second, resChan)
 
@@ -124,6 +140,7 @@ Loop:
 }
 
 func requireTargetGroups(t *testing.T, expected, res map[string]*targetgroup.Group) {
+	t.Helper()
 	b1, err := json.Marshal(expected)
 	if err != nil {
 		panic(err)
